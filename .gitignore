@@ -1,0 +1,15 @@
+# Secrets — .env.local holds the Clerk secret key and the Supabase service-role
+# key. Only the placeholder template (.env.local.example) belongs in git.
+.env
+.env.*
+!.env.local.example
+
+node_modules/
+.next/
+out/
+
+# Uploaded packet files (served from /uploads when Supabase Storage is unused)
+server/uploads/
+
+.DS_Store
+*.log

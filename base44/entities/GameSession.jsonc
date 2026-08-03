@@ -1,0 +1,218 @@
+{
+  "name": "GameSession",
+  "type": "object",
+  "properties": {
+    "round_id": {
+      "type": "string",
+      "description": "Round played (empty for marathon sessions, which sample from round_ids instead)"
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "solo",
+        "multiplayer"
+      ]
+    },
+    "game_type": {
+      "type": "string",
+      "enum": [
+        "standard",
+        "marathon"
+      ],
+      "default": "standard",
+      "description": "Marathon sessions are endless: clients derive an identical infinite question sequence from seed + round_ids + subject_freq"
+    },
+    "room_code": {
+      "type": "string"
+    },
+    "host_id": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "waiting",
+        "active",
+        "finished"
+      ],
+      "default": "waiting"
+    },
+    "is_public": {
+      "type": "boolean",
+      "default": false,
+      "description": "Public rooms are listed in the multiplayer lobby's public games browser"
+    },
+    "locked": {
+      "type": "boolean",
+      "default": false,
+      "description": "Host-controlled: when true, no new players may join (existing players are unaffected)"
+    },
+    "seed": {
+      "type": "number",
+      "description": "Marathon only — PRNG seed shared by all clients for deterministic question sampling"
+    },
+    "round_ids": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Marathon only — rounds in the sampling pool (empty = all rounds)"
+    },
+    "round_filter": {
+      "type": "string",
+      "enum": ["all", "RR", "DE"],
+      "description": "Marathon only — restrict pool to Round Robin / Double Elim packets"
+    },
+    "subject_freq": {
+      "type": "object",
+      "additionalProperties": { "type": "number" },
+      "description": "Marathon only — per-subject weight percent (0–100), normalized into sampling shares"
+    },
+    "players": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "user_id": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "score": {
+            "type": "number",
+            "default": 0
+          },
+          "team": {
+            "type": "string",
+            "default": ""
+          },
+          "answers": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "teams": {
+      "type": "array",
+      "description": "Team definitions",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "captain_id": {
+            "type": "string"
+          },
+          "score": {
+            "type": "number",
+            "default": 0
+          }
+        }
+      }
+    },
+    "current_question_index": {
+      "type": "number",
+      "default": 0
+    },
+    "buzz_state": {
+      "type": "object",
+      "description": "Shared buzz state for the current question",
+      "properties": {
+        "buzzed_player_id": {
+          "type": "string"
+        },
+        "buzzed_team": {
+          "type": "string"
+        },
+        "buzzed_display_name": {
+          "type": "string"
+        },
+        "result": {
+          "type": "string"
+        },
+        "question_dead": {
+          "type": "boolean",
+          "default": false
+        },
+        "bonus_for_team": {
+          "type": "string"
+        },
+        "bonus_for_player": {
+          "type": "string"
+        },
+        "negged_teams": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "chat_messages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "sender_id": {
+            "type": "string"
+          },
+          "sender_name": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "ts": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "settings": {
+      "type": "object",
+      "properties": {
+        "read_aloud": {
+          "type": "boolean",
+          "default": false
+        },
+        "wpm": {
+          "type": "number",
+          "default": 200
+        },
+        "answer_time": {
+          "type": "number",
+          "default": 5
+        },
+        "subjects": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "question_types": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "skip_bonuses": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "question_results": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  "required": [
+    "round_id",
+    "mode"
+  ]
+}

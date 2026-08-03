@@ -1,0 +1,74 @@
+{
+  "name": "LeaderboardEntry",
+  "type": "object",
+  "properties": {
+    "username": {
+      "type": "string",
+      "description": "Display name shown on leaderboard — taken automatically from the poster's profile (full name or email prefix), never typed manually"
+    },
+    "score": {
+      "type": "number",
+      "description": "Final score"
+    },
+    "round_title": {
+      "type": "string",
+      "description": "Name of the round played"
+    },
+    "correct": {
+      "type": "number",
+      "description": "Number of correct answers"
+    },
+    "total": {
+      "type": "number",
+      "description": "Total questions answered"
+    },
+    "negs": {
+      "type": "number",
+      "description": "Number of incorrect early interrupts",
+      "default": 0
+    },
+    "correct_interrupts": {
+      "type": "number",
+      "description": "Number of correct early interrupts",
+      "default": 0
+    },
+    "subject_points": {
+      "type": "object",
+      "description": "Points earned per subject category",
+      "additionalProperties": {
+        "type": "number"
+      }
+    },
+    "subjects_filter": {
+      "type": "array",
+      "description": "Subjects selected if custom game (empty = all subjects)",
+      "items": {
+        "type": "string"
+      }
+    },
+    "is_custom": {
+      "type": "boolean",
+      "description": "True if subjects were filtered/customized",
+      "default": false
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "solo",
+        "multiplayer",
+        "marathon"
+      ],
+      "description": "Marathon entries (solo or multiplayer marathon) get their own leaderboard tab",
+      "default": "solo"
+    },
+    "date": {
+      "type": "string",
+      "description": "ISO date string"
+    }
+  },
+  "required": [
+    "username",
+    "score",
+    "round_title"
+  ]
+}

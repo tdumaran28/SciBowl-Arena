@@ -1,0 +1,125 @@
+{
+  "name": "UserStats",
+  "type": "object",
+  "properties": {
+    "user_email": {
+      "type": "string"
+    },
+    "username": {
+      "type": "string",
+      "description": "Display username for leaderboard"
+    },
+    "total_games": {
+      "type": "number",
+      "default": 0
+    },
+    "total_questions_answered": {
+      "type": "number",
+      "default": 0
+    },
+    "total_correct": {
+      "type": "number",
+      "default": 0
+    },
+    "total_score": {
+      "type": "number",
+      "default": 0
+    },
+    "subject_stats": {
+      "type": "object",
+      "description": "Per-subject accuracy stats",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "correct": {
+            "type": "number"
+          },
+          "total": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    "game_history": {
+      "type": "array",
+      "description": "Full game history with notes",
+      "items": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "round_title": {
+            "type": "string"
+          },
+          "score": {
+            "type": "number"
+          },
+          "correct": {
+            "type": "number"
+          },
+          "total": {
+            "type": "number"
+          },
+          "negs": {
+            "type": "number",
+            "default": 0
+          },
+          "powers": {
+            "type": "number",
+            "default": 0
+          },
+          "tossups_total": {
+            "type": "number"
+          },
+          "bonuses_total": {
+            "type": "number"
+          },
+          "subject_breakdown": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "correct": {
+                  "type": "number"
+                },
+                "total": {
+                  "type": "number"
+                }
+              }
+            }
+          },
+          "mode": {
+            "type": "string"
+          },
+          "date": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "subjects_played": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "rounds_played": {
+      "type": "array",
+      "description": "IDs of rounds the user has played",
+      "items": {
+        "type": "string"
+      }
+    },
+    "notes": {
+      "type": "string",
+      "description": "General personal notes"
+    }
+  },
+  "required": [
+    "user_email"
+  ]
+}

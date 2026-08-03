@@ -1,0 +1,138 @@
+{
+  "name": "Round",
+  "type": "object",
+  "properties": {
+    "title": {
+      "type": "string",
+      "description": "Round title/name"
+    },
+    "source": {
+      "type": "string",
+      "description": "Tournament/source name"
+    },
+    "year": {
+      "type": "string",
+      "description": "Year of the round"
+    },
+    "category": {
+      "type": "string",
+      "description": "Subject category if applicable"
+    },
+    "file_url": {
+      "type": "string",
+      "description": "URL of the uploaded file"
+    },
+    "file_name": {
+      "type": "string",
+      "description": "Original filename"
+    },
+    "file_type": {
+      "type": "string",
+      "enum": [
+        "pdf",
+        "docx"
+      ],
+      "description": "File type"
+    },
+    "questions": {
+      "type": "array",
+      "description": "Parsed questions array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "number": {
+            "type": "number",
+            "description": "Question set number (tossup and bonus share the same number)"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "TOSSUP",
+              "BONUS"
+            ]
+          },
+          "subject": {
+            "type": "string",
+            "enum": [
+              "Biology",
+              "Chemistry",
+              "Physics",
+              "Earth and Space",
+              "Math",
+              "Energy",
+              "General Science"
+            ],
+            "description": "Science Bowl subject category"
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "Multiple Choice",
+              "Short Answer"
+            ]
+          },
+          "question_text": {
+            "type": "string"
+          },
+          "choices": {
+            "type": "object",
+            "properties": {
+              "W": {
+                "type": "string"
+              },
+              "X": {
+                "type": "string"
+              },
+              "Y": {
+                "type": "string"
+              },
+              "Z": {
+                "type": "string"
+              }
+            }
+          },
+          "answer": {
+            "type": "string"
+          },
+          "answer_alternates": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "question_set": {
+            "type": "string",
+            "description": "Name of the source packet/file this question came from"
+          }
+        }
+      }
+    },
+    "question_count": {
+      "type": "number"
+    },
+    "parse_status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "processing",
+        "success",
+        "error"
+      ]
+    },
+    "parse_error": {
+      "type": "string"
+    },
+    "uploaded_by": {
+      "type": "string"
+    },
+    "is_public": {
+      "type": "boolean",
+      "default": true
+    }
+  },
+  "required": [
+    "title",
+    "file_url",
+    "file_name"
+  ]
+}

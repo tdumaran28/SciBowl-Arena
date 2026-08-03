@@ -1,0 +1,69 @@
+{
+  "name": "HelpContent",
+  "type": "object",
+  "description": "Editable content for the Help & Guide page, stored one record per part of the page: a `header` record, one `section` record per section, and a `cta` record. The app loads every record, orders them by `position`, and reassembles the page (src/content/helpContent.js → assembleHelpContent), falling back to the bundled default (src/content/helpContent.js → DEFAULT_HELP_CONTENT) when no records exist. Seed/refresh with `npm run seed:help`.",
+  "properties": {
+    "kind": {
+      "type": "string",
+      "enum": ["header", "section", "cta"],
+      "description": "Which part of the page this record holds"
+    },
+    "slug": {
+      "type": "string",
+      "description": "Stable row identity — 'header', the section's id, or 'cta'. Unique across records; the seed script matches on it to update a part in place."
+    },
+    "position": {
+      "type": "number",
+      "description": "Sort order. Header is 0, sections are 10, 20, 30… (gaps leave room to insert one between two others), cta is 10000."
+    },
+    "content": {
+      "type": "object",
+      "description": "The part itself — shape depends on `kind`.",
+      "oneOf": [
+        {
+          "title": "header",
+          "properties": {
+            "title": { "type": "string" },
+            "subtitle": { "type": "string" }
+          }
+        },
+        {
+          "title": "section",
+          "properties": {
+            "id": { "type": "string" },
+            "navLabel": { "type": "string" },
+            "icon": { "type": "string", "description": "Lucide icon name (must exist in Help.jsx ICONS map)" },
+            "color": { "type": "string", "description": "Tailwind text color class for the icon" },
+            "bg": { "type": "string", "description": "Tailwind background class for the icon chip" },
+            "title": { "type": "string" },
+            "blocks": {
+              "type": "array",
+              "description": "Content blocks. Each has a `type` (p, label, badges, cards, grid, kbds, info, code, prompt, steps, bullets, tiles, rules, faq) plus type-specific fields. Text supports **bold** and `code` inline markup.",
+              "items": { "type": "object" }
+            }
+          }
+        },
+        {
+          "title": "cta",
+          "properties": {
+            "title": { "type": "string" },
+            "text": { "type": "string" },
+            "buttons": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "label": { "type": "string" },
+                  "href": { "type": "string" },
+                  "icon": { "type": "string" },
+                  "variant": { "type": "string" }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "required": ["kind", "slug", "content"]
+}
