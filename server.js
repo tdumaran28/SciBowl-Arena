@@ -25,7 +25,13 @@ const MIME = {
 const app = next({ dev });
 const handle = app.getRequestHandler();
 
+// prepare() prints nothing while it loads Next's module graph, which can take
+// minutes on machines with on-access antivirus scanning. Say something first so
+// a slow start isn't mistaken for a hang.
+console.log(`Starting Next.js (${dev ? 'development' : 'production'})…`);
+const prepareStart = Date.now();
 await app.prepare();
+console.log(`Next.js ready in ${((Date.now() - prepareStart) / 1000).toFixed(1)}s`);
 
 const server = createServer((req, res) => {
   // Serve uploaded packet files directly

@@ -2,12 +2,12 @@ import { ClerkProvider } from '@clerk/nextjs';
 import Providers from './providers';
 import '@/index.css';
 
+// The tab icon comes from the file convention: app/icon.png. Next hashes and
+// serves it automatically — don't add an `icons` field here, it would override
+// the file.
 export const metadata = {
   title: 'SciBowl Arena',
   description: 'Upload Science Bowl packets, practice solo, and compete with teammates.',
-  icons: {
-    icon: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9A%9B%EF%B8%8F%3C/text%3E%3C/svg%3E",
-  },
 };
 
 // Shown until Clerk is configured, instead of a blank crash.
