@@ -3,12 +3,27 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
-import { SUBJECT_COLORS, fuzzyMatch } from '@/utils/parseRound';
+import { SUBJECT_COLORS, fuzzyMatch, pointsFor, BOSS_UP_EXTRA_SECONDS } from '@/utils/parseRound';
 import { cn } from '@/lib/utils';
 import { CheckCircle2, XCircle, Clock, Zap, Hash, Pause, LogOut } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import AnswerCover from '@/components/game/AnswerCover';
 import { serverNow } from '@/lib/clock';
+
+// Which choice a multiple-choice submission refers to — a bare letter, a "W)…"
+// prefix, or the choice text typed out. Recorded alongside the raw submission
+// so the review screens can show the option the player actually picked.
+function resolveChoiceLetter(answer, choices) {
+  if (!answer) return null;
+  const a = answer.trim();
+  const letter = a.match(/^([WXYZ])(?:[).\s]|$)/i);
+  if (letter) return letter[1].toUpperCase();
+  const normalize = (s) => s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  const target = normalize(a);
+  for (const l of ['W', 'X', 'Y', 'Z']) {
+    if (choices?.[l] && normalize(choices[l]) === target) return l;
+  }
+  return null;
+}
 
 function checkMCAnswer(answer, correctLetter, choices) {
   if (!answer || !correctLetter) return false;
@@ -35,6 +50,11 @@ export default function QuestionReader({
   question,
   questionIndex,
   totalQuestions,
+  // Counter shown top-left. Packets are counted in tossup/bonus pairs, so this
+  // is "12.T of 23", not "23 of 46" — the caller owns the numbering because
+  // only it holds the whole question list. Falls back to a plain index.
+  positionLabel = null,
+  totalPositions = null,
   settings,
   onAnswer,
   onNext,
@@ -87,8 +107,18 @@ export default function QuestionReader({
   const buzzEnabledRef = useRef(true);
   const externalBuzzedRef = useRef(false);
   // Keep latest values accessible inside interval without re-creating it
+  // Identity of the question being read RIGHT NOW. Keyed on its position in the
+  // queue, not on `number`/`type`: a bonus carries the same number as the tossup
+  // it follows, and as a boss-up it carries the same type too — so a
+  // number+type key silently treated the second half of every pair as "still
+  // the same question" and never reset the reader. Marathon can draw the same
+  // number and type twice in a row from different packets, with the same
+  // result. The position is the only thing guaranteed to change on every read.
+  const questionKey = `${questionIndex}:${question?.number ?? ''}:${question?.type ?? ''}`;
+  const questionKeyRef = useRef(questionKey);
   const questionRef = useRef(question);
   const settingsRef = useRef(settings);
+  useEffect(() => { questionKeyRef.current = questionKey; }, [questionKey]);
   useEffect(() => { questionRef.current = question; }, [question]);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
   useEffect(() => { allWordsShownRef.current = allWordsShown; }, [allWordsShown]);
@@ -105,8 +135,14 @@ export default function QuestionReader({
   const isFullMode = settings?.display_mode === 'full';
   const isMC = question?.format === 'Multiple Choice';
   const isBonus = question?.type === 'BONUS';
+  // A boss-up is a bonus played as a tossup — read from the first word, open to
+  // everyone, but with a longer window to buzz than a real tossup.
+  const isBossUp = !!question?.boss_up;
   const isTimed = settings?.timed !== false;
-  const buzzTime = isBonus ? (settings?.buzz_time || 5) + 15 : (settings?.buzz_time || 5);
+  const baseBuzzTime = settings?.buzz_time || 5;
+  const buzzTime = isBonus
+    ? baseBuzzTime + 15
+    : baseBuzzTime + (isBossUp ? BOSS_UP_EXTRA_SECONDS : 0);
 
   const clearWordInterval = () => clearInterval(wordIntervalRef.current);
 
@@ -196,13 +232,17 @@ export default function QuestionReader({
     setAnsweredQKey(null);
     setAnsweredQuestion(null);
     wordIdxRef.current = 0;
+    deadReportedRef.current = false;
 
     if (settingsRef.current?.display_mode === 'full' || (multiplayer && questionRef.current?.type === 'BONUS')) {
       setAllWordsShown(true);
     } else if (!externalBuzzedRef.current && !resolvedRef.current) {
       startWordByWord();
     }
-  }, [question?.number, question?.type, startWordByWord, multiplayer]);  
+    // questionKey, not number/type — see its definition. `question` itself is a
+    // fresh object every render (marathon derives it, boss-ups rewrite it), so
+    // it cannot be the dependency either.
+  }, [questionKey, startWordByWord, multiplayer]);
 
   // ── Sync: fast-forward the visible word position to where every client
   // should be, given the server-stamped reading start. ───────────────────────
@@ -243,6 +283,12 @@ export default function QuestionReader({
   const buzzedEarlyRef = useRef(false);
   useEffect(() => { answerResultRef.current = answerResult; }, [answerResult]);
   useEffect(() => { buzzedEarlyRef.current = buzzedEarly; }, [buzzedEarly]);
+  // Held in a ref so the countdown timers can report without listing a prop
+  // that changes identity on every parent render as a dependency — re-running
+  // those effects would restart the one-second tick.
+  const onAnswerRef = useRef(onAnswer);
+  useEffect(() => { onAnswerRef.current = onAnswer; }, [onAnswer]);
+  const deadReportedRef = useRef(false);
 
   // ── Multiplayer: freeze reading while another player is answering; resume from
   // the paused position only when the question reopens (initial buzzer was wrong).
@@ -296,12 +342,19 @@ export default function QuestionReader({
     const q = questionRef.current;
     const early = buzzedEarlyRef.current;
 
+    // What the player submitted travels with the result: the review screens
+    // show it back to them, and without it a wrong answer is indistinguishable
+    // from never having answered at all.
     if (answer === null) {
       answerResultRef.current = 'timeout';
       setAnswerResult('timeout');
-      setAnsweredQKey(`${q?.number}-${q?.type}`);
+      setAnsweredQKey(questionKeyRef.current);
       setAnsweredQuestion(q);
-      onAnswer({ result: 'timeout', type: q.type, interrupted: early });
+      onAnswer({
+        result: 'timeout', type: q.type, interrupted: early,
+        submitted_answer: null, submitted_choice: null,
+        question_format: q?.format || '',
+      });
       setRevealed(true);
       return;
     }
@@ -312,19 +365,25 @@ export default function QuestionReader({
       ? checkMCAnswer(answer, correctLetter, q.choices)
       : fuzzyMatch(answer, q.answer, q.answer_alternates, q.question_text);
 
+    const submission = {
+      submitted_answer: answer,
+      submitted_choice: mc ? resolveChoiceLetter(answer, q.choices) : null,
+      question_format: q?.format || '',
+    };
+
     if (isCorrect) {
       answerResultRef.current = 'correct';
       setAnswerResult('correct');
-      setAnsweredQKey(`${q?.number}-${q?.type}`);
+      setAnsweredQKey(questionKeyRef.current);
       setAnsweredQuestion(q);
-      onAnswer({ result: 'correct', type: q.type, interrupted: early });
+      onAnswer({ result: 'correct', type: q.type, interrupted: early, ...submission });
     } else {
       const resultKey = (early && q.type === 'TOSSUP') ? 'interrupt_wrong' : 'wrong';
       answerResultRef.current = resultKey;
       setAnswerResult(resultKey);
-      setAnsweredQKey(`${q?.number}-${q?.type}`);
+      setAnsweredQKey(questionKeyRef.current);
       setAnsweredQuestion(q);
-      onAnswer({ result: resultKey, type: q.type, interrupted: early });
+      onAnswer({ result: resultKey, type: q.type, interrupted: early, ...submission });
     }
     setRevealed(true);
   }, [onAnswer]);
@@ -333,12 +392,28 @@ export default function QuestionReader({
   useEffect(() => {
     if (buzzTimeLeft === null || buzzing || answerResult || dead || paused || resolved || externalBuzzed) return;
     if (buzzTimeLeft <= 0) {
+      const q = questionRef.current;
+      // Report the expiry exactly once per question: `dead` is set in the same
+      // pass, so without this a re-entrant run (React's development double
+      // invoke) could log the question twice.
+      if (deadReportedRef.current) return;
+      deadReportedRef.current = true;
       setDead(true);
-      setAnsweredQKey(`${questionRef.current?.number}-${questionRef.current?.type}`);
+      setAnsweredQKey(questionKeyRef.current);
+      // Freeze the question the answer belongs to (solo reveals it immediately).
+      setAnsweredQuestion(q);
       setBuzzTimeLeft(null);
       // Bonuses need this too, or an unanswered bonus never resolves and the
       // match can't advance (the session handler decides what "dead" means).
       if (multiplayer) onDead?.();
+      // Solo: record the question as unanswered rather than dropping it. It
+      // scores nothing either way, but a question the clock ran out on has to
+      // appear in the review — otherwise it silently vanishes from the game.
+      else onAnswerRef.current?.({
+        result: 'timeout', type: q?.type, interrupted: false,
+        submitted_answer: null, submitted_choice: null,
+        question_format: q?.format || '',
+      });
       return;
     }
     const t = setTimeout(() => setBuzzTimeLeft(v => v - 1), 1000);
@@ -448,30 +523,44 @@ export default function QuestionReader({
 
   // Guard: only show result/dead/next UI for the question that was actually answered.
   // Prevents the answer from flashing when advancing to a new question.
-  const currentQKey = `${question?.number}-${question?.type}`;
-  const resultForCurrent = answeredQKey === currentQKey;
+  const resultForCurrent = answeredQKey === questionKey;
   const showResult = !multiplayer && answerResult && revealed && resultForCurrent;
   const showDead = !multiplayer && dead && resultForCurrent;
   // Hard gate for any answer reveal (text + MC correct-letter highlight).
   // Requires a frozen answered snapshot AND key match AND revealed flag.
   const shouldShowAnswer = !multiplayer && !!answerResult && revealed && resultForCurrent && !!answeredQuestion;
+  // Dead with nobody having answered: the answer is shown straight away rather
+  // than behind a reveal step — the question is over, there is nothing left to
+  // protect. Same frozen-snapshot gate, so the next question's answer can never
+  // flash here during the transition.
+  const showDeadAnswer = !multiplayer && dead && !answerResult && resultForCurrent && !!answeredQuestion;
+  const deadQuestion = answeredQuestion;
 
   const pointLabel = (res) => {
-    if (res === 'correct') return answeredQuestion?.type === 'TOSSUP' ? '+4 pts' : '+10 pts';
-    if (res === 'interrupt_wrong') return '−4 pts';
     if (res === 'wrong') return '0 pts';
-    return '';
+    if (res !== 'correct' && res !== 'interrupt_wrong') return '';
+    const pts = pointsFor(res, answeredQuestion?.type, {
+      interrupted: buzzedEarly,
+      powers: !!settings?.powers,
+    });
+    return `${pts > 0 ? '+' : pts < 0 ? '−' : ''}${Math.abs(pts)} pts`;
   };
+  const isPower = !!settings?.powers && buzzedEarly && answerResult === 'correct'
+    && answeredQuestion?.type === 'TOSSUP';
 
   return (
     <div className="space-y-4">
       {/* ── Question header ── */}
       <div className="flex items-center gap-2 flex-wrap">
         <span className="flex items-center gap-1 text-sm font-medium text-muted-foreground">
-          <Hash className="w-3.5 h-3.5" />{questionIndex + 1}
-          <span className="text-muted-foreground/50">/{Number.isFinite(totalQuestions) ? totalQuestions : '∞'}</span>
+          <Hash className="w-3.5 h-3.5" />{positionLabel ?? questionIndex + 1}
+          <span className="text-muted-foreground/50">
+            /{Number.isFinite(totalPositions ?? totalQuestions) ? (totalPositions ?? totalQuestions) : '∞'}
+          </span>
         </span>
-        <Badge variant={isBonus ? 'secondary' : 'default'} className="text-xs">{question?.type}</Badge>
+        <Badge variant={isBonus ? 'secondary' : 'default'} className="text-xs">
+          {isBossUp ? 'BOSS-UP' : question?.type}
+        </Badge>
         <Badge variant="outline" className={cn('text-xs', SUBJECT_COLORS[question?.subject] || '')}>
           {question?.subject}
         </Badge>
@@ -528,7 +617,7 @@ export default function QuestionReader({
             // This prevents the NEXT question's correct choice from flashing
             // during the one-frame stale-state window after Next is pressed.
             const frozenCorrectLetter = answeredQuestion?.answer?.toUpperCase().replace(/^([WXYZ])[).\s].*/, '$1').trim();
-            const isCorrectLetter = shouldShowAnswer && letter === frozenCorrectLetter;
+            const isCorrectLetter = (shouldShowAnswer || showDeadAnswer) && letter === frozenCorrectLetter;
             const pickedThis = shouldShowAnswer && selectedChoice === letter;
             return (
               <button
@@ -622,24 +711,22 @@ export default function QuestionReader({
         </div>
       )}
 
-      {/* ── Dead question actions ── */}
+      {/* ── Dead question ── */}
       {showDead && !answerResult && (
-        <div className="flex gap-2 items-center">
-          <div className="flex-1 rounded-lg bg-slate-100 dark:bg-slate-800 px-4 py-3 text-sm text-slate-500 dark:text-slate-400 text-center">
-            Question dead — no one buzzed in time
-          </div>
-          <Button variant="outline" onClick={() => { setRevealed(true); setAnswerResult('dead'); setAnsweredQKey(currentQKey); setAnsweredQuestion(question); }}>
-            Reveal
-          </Button>
+        <div className="rounded-lg bg-slate-100 dark:bg-slate-800 px-4 py-3 text-sm text-slate-500 dark:text-slate-400 text-center">
+          Question dead — no one buzzed in time
         </div>
       )}
 
-      {/* ── Answer reveal zone (covered until revealed for the CURRENT question) ── */}
-      {/* Primary guard: content renders only when shouldShowAnswer is true. */}
-      {/* Backup guard: AnswerCover overlay physically blocks the zone otherwise. */}
+      {/* ── Answer zone ──
+          Rendered only once the question is over for this player: answered,
+          timed out, or dead. While it is live there is nothing here at all —
+          no placeholder to click, and nothing on screen that could leak the
+          answer to someone still being read the question. */}
+      {(shouldShowAnswer || showDeadAnswer) && (
       <div className="relative rounded-xl border bg-card min-h-[64px] overflow-hidden">
         <AnimatePresence>
-          {shouldShowAnswer && answerResult !== 'dead' && (
+          {shouldShowAnswer && (
             <motion.div
               key="result"
               initial={{ opacity: 0, y: 6 }}
@@ -659,7 +746,7 @@ export default function QuestionReader({
                 }
                 <div>
                   <p className="font-semibold text-sm">
-                    {answerResult === 'correct' && `Correct! ${pointLabel('correct')}`}
+                    {answerResult === 'correct' && `${isPower ? 'Power! ' : 'Correct! '}${pointLabel('correct')}`}
                     {answerResult === 'wrong' && `Incorrect. ${pointLabel('wrong')}`}
                     {answerResult === 'interrupt_wrong' && `Interrupt penalty! ${pointLabel('interrupt_wrong')}`}
                     {answerResult === 'timeout' && "Time's up! 0 pts"}
@@ -674,23 +761,25 @@ export default function QuestionReader({
               </div>
             </motion.div>
           )}
-          {shouldShowAnswer && answerResult === 'dead' && (
+          {showDeadAnswer && (
             <motion.div
               key="dead"
               initial={{ opacity: 0, y: 6 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0 }}
-              className="p-4 rounded-xl border-0 bg-slate-50 dark:bg-slate-900/40"
+              className="p-4 rounded-xl border-0 bg-slate-100 dark:bg-slate-800/60"
             >
               <p className="text-sm text-muted-foreground">
-                Answer: <span className="font-medium text-foreground">{answeredQuestion?.answer}</span>
+                Answer: <span className="font-medium text-foreground">{deadQuestion?.answer}</span>
+                {deadQuestion?.answer_alternates?.length > 0 && (
+                  <span className="text-xs"> (also: {deadQuestion.answer_alternates.join(', ')})</span>
+                )}
               </p>
             </motion.div>
           )}
         </AnimatePresence>
-        {/* Cover overlay — backup: blocks any stale/transitioning answer from being seen */}
-        <AnswerCover visible={!shouldShowAnswer} label={answerResult && !resultForCurrent ? 'Answer hidden' : 'Answer hidden — buzz in or reveal'} />
       </div>
+      )}
 
       {/* ── Next / keyboard hints ── */}
       {(showResult || showDead) && (

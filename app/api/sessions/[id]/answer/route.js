@@ -12,7 +12,10 @@ export async function POST(request, { params }) {
 
   try {
     const body = await request.json().catch(() => ({}));
-    const { player_id, display_name, team, result, type, interrupted } = body || {};
+    const {
+      player_id, display_name, team, result, type, interrupted,
+      submitted_answer, submitted_choice, question_format,
+    } = body || {};
     if (!player_id || !result) {
       return NextResponse.json({ message: 'player_id and result are required' }, { status: 400 });
     }
@@ -24,6 +27,12 @@ export async function POST(request, { params }) {
       result,
       type,
       interrupted,
+      // The question list is derived client-side (marathon rooms have no stored
+      // list at all), so the format travels with the answer — it decides how
+      // many wrong answers kill the tossup.
+      submittedAnswer: submitted_answer ?? null,
+      submittedChoice: submitted_choice ?? null,
+      questionFormat: question_format || '',
     });
     if (!outcome) return NextResponse.json({ message: 'Session not found' }, { status: 404 });
     if (outcome.rejected) {

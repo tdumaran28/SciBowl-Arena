@@ -4,20 +4,19 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { Trophy, Download, Loader2, CheckCircle2, StickyNote, Save } from 'lucide-react';
+import { pointsFor, submittedText } from '@/utils/parseRound';
 import { toast } from 'sonner';
 
-function exportCSV(results, questions, roundTitle) {
+function exportCSV(results, questions, roundTitle, powers) {
   const headers = ['#', 'Type', 'Subject', 'Format', 'Question', 'Your Answer', 'Correct Answer', 'Result', 'Points'];
   const rows = results.map((r, i) => {
     const q = questions[i];
     if (!q) return null;
-    const pts = r.result === 'correct' && r.type === 'TOSSUP' ? 4
-      : r.result === 'correct' && r.type === 'BONUS' ? 10
-      : r.result === 'interrupt_wrong' ? -4 : 0;
+    const pts = pointsFor(r.result, r.type, { interrupted: r.interrupted, powers });
     return [
       i + 1, q.type, q.subject || '', q.format || '',
       `"${(q.question_text || '').replace(/"/g, '""')}"`,
-      `"${(r.typedAnswer || r.selectedChoice || r.result || '').replace(/"/g, '""')}"`,
+      `"${(submittedText(r, q) || 'No answer given').replace(/"/g, '""')}"`,
       `"${(q.answer || '').replace(/"/g, '""')}"`,
       r.result, pts,
     ];
@@ -33,7 +32,7 @@ function exportCSV(results, questions, roundTitle) {
   URL.revokeObjectURL(url);
 }
 
-export default function PostGameActions({ results, questions, roundTitle, score, mode = 'solo', subjectsFilter = [], hideLeaderboard = false, sessionId = null }) {
+export default function PostGameActions({ results, questions, roundTitle, score, mode = 'solo', subjectsFilter = [], hideLeaderboard = false, sessionId = null, powers = false, bossUps = false }) {
   // Leaderboard username comes straight from the signed-in profile — no
   // manual entry.
   const [username, setUsername] = useState('');
@@ -59,15 +58,17 @@ export default function PostGameActions({ results, questions, roundTitle, score,
     if (!q) return;
     const s = q.subject || 'General Science';
     if (!subjectPoints[s]) subjectPoints[s] = 0;
-    if (r.result === 'correct' && r.type === 'TOSSUP') subjectPoints[s] += 4;
-    if (r.result === 'correct' && r.type === 'BONUS') subjectPoints[s] += 10;
-    if (r.result === 'interrupt_wrong') subjectPoints[s] -= 4;
+    subjectPoints[s] += pointsFor(r.result, r.type, { interrupted: r.interrupted, powers });
   });
 
-  // A game is "standard" if the round covers all required subjects (Energy optional)
+  // A game is "standard" if the round covers all required subjects (Energy
+  // optional) and was scored by the official rules. Powers and boss-ups are
+  // house rules — their scores are not comparable to standard ones, so they go
+  // to the custom board.
   const REQUIRED_SUBJECTS = ['Biology', 'Chemistry', 'Physics', 'Earth and Space', 'Math'];
   const playedSubjects = [...new Set(questions.map(q => q.subject).filter(Boolean))];
-  const isCustom = subjectsFilter.length > 0 || !REQUIRED_SUBJECTS.every(s => playedSubjects.includes(s));
+  const isCustom = powers || bossUps || subjectsFilter.length > 0
+    || !REQUIRED_SUBJECTS.every(s => playedSubjects.includes(s));
 
   const handlePost = async () => {
     setPosting(true);
@@ -92,6 +93,8 @@ export default function PostGameActions({ results, questions, roundTitle, score,
         subject_points: subjectPoints,
         subjects_filter: isCustom ? subjectsFilter : [],
         is_custom: isCustom,
+        powers,
+        boss_ups: bossUps,
         mode,
         date: new Date().toISOString(),
       });
@@ -152,7 +155,7 @@ export default function PostGameActions({ results, questions, roundTitle, score,
       </div>
 
       {/* CSV Export */}
-      <Button variant="outline" onClick={() => exportCSV(results, questions, roundTitle)} className="w-full">
+      <Button variant="outline" onClick={() => exportCSV(results, questions, roundTitle, powers)} className="w-full">
         <Download className="w-4 h-4 mr-2" /> Export Results as CSV
       </Button>
 
@@ -174,7 +177,11 @@ export default function PostGameActions({ results, questions, roundTitle, score,
               {mode === 'marathon'
                 ? 'Posts to the Marathon leaderboard'
                 : isCustom
-                  ? `Posts to the Custom Game leaderboard${subjectsFilter.length ? ` (subjects: ${subjectsFilter.join(', ')})` : ''}`
+                  ? `Posts to the Custom Game leaderboard${
+                      [powers && 'powers', bossUps && 'boss-ups'].filter(Boolean).length
+                        ? ` (${[powers && 'powers', bossUps && 'boss-ups'].filter(Boolean).join(', ')})`
+                        : ''
+                    }${subjectsFilter.length ? ` (subjects: ${subjectsFilter.join(', ')})` : ''}`
                   : 'Posts to the Standard leaderboard'} · username from your profile
             </p>
           </div>

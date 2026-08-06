@@ -12,6 +12,7 @@ import GameResults from '@/components/game/GameResults';
 import GameKindSelect from '@/components/game/GameKindSelect';
 import MarathonSetup, { DEFAULT_MARATHON_CONFIG } from '@/components/game/MarathonSetup';
 import { buildMarathonPools, marathonQuestionAt, randomSeed } from '@/utils/marathon';
+import { calculateScore, applyQuestionRules, asBossUp, pairPositions } from '@/utils/parseRound';
 import { BookOpen, Timer, Play } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -19,6 +20,8 @@ const DEFAULT_SETTINGS = {
   read_aloud: false,
   wpm: 250,
   answer_time: 8,
+  powers: false,
+  boss_ups: false,
   skip_bonuses: false,
   subjects: [],
   question_types: ['TOSSUP', 'BONUS'],
@@ -68,16 +71,17 @@ export default function SoloPlay() {
     subjectFreq: marathonConfig.subjectFreq,
   }), [rounds, marathonConfig, settings.question_types]);
 
-  const buildQuestionQueue = useCallback((round, cfg) => {
-    let qs = round.questions || [];
-    if (cfg.subjects?.length > 0) {
-      qs = qs.filter(q => cfg.subjects.includes(q.subject));
-    }
-    if (cfg.skip_bonuses) {
-      qs = qs.filter(q => q.type === 'TOSSUP');
-    }
-    return qs;
-  }, []);
+  const buildQuestionQueue = useCallback(
+    (round, cfg) => applyQuestionRules(round.questions, cfg),
+    [],
+  );
+
+  // Marathon draws one question at a time, so the boss-up rewrite is applied to
+  // each draw rather than to a list.
+  const drawMarathonQuestion = useCallback((k) => {
+    const q = marathonQuestionAt(marathonPools, seedRef.current, k);
+    return settings.boss_ups ? asBossUp(q) : q;
+  }, [marathonPools, settings.boss_ups]);
 
   const handleStart = () => {
     if (isMarathon) {
@@ -88,7 +92,7 @@ export default function SoloPlay() {
       // Endless: question k is drawn on demand from (seed, k) rather than
       // pre-building a queue, so the run never runs out.
       seedRef.current = randomSeed();
-      setActiveQuestions([marathonQuestionAt(marathonPools, seedRef.current, 0)]);
+      setActiveQuestions([drawMarathonQuestion(0)]);
     } else {
       if (!selectedRound) return;
       const qs = buildQuestionQueue(selectedRound, settings);
@@ -106,6 +110,20 @@ export default function SoloPlay() {
   };
 
   const currentQuestion = activeQuestions[currentIndex];
+
+  // Counter numbering: round practice counts tossup/bonus pairs (12.T of 23).
+  // Marathon has no pairs — every draw stands alone — so it numbers the draws
+  // and just marks which kind each one is.
+  const positions = useMemo(() => pairPositions(activeQuestions), [activeQuestions]);
+  const positionLabelAt = useCallback((index) => {
+    if (index == null || index < 0) return null;
+    if (!isMarathon) return positions.labels[index] ?? null;
+    const q = activeQuestions[index];
+    return `${index + 1}.${(q?.original_type || q?.type) === 'BONUS' ? 'B' : 'T'}`;
+  }, [isMarathon, positions, activeQuestions]);
+  const positionLabel = positionLabelAt(currentIndex);
+  // Index-aligned with `results`, for the score panel and the results review.
+  const resultLabels = results.map(r => positionLabelAt(r.questionIndex));
 
   const handleAnswer = (result) => {
     setResults(prev => [...prev, { ...result, questionIndex: currentIndex }]);
@@ -139,7 +157,7 @@ export default function SoloPlay() {
     // sampled question stands alone — no bonus ownership to carry.
     if (isMarathon) {
       const k = currentIndex + 1;
-      const q = marathonQuestionAt(marathonPools, seedRef.current, k);
+      const q = drawMarathonQuestion(k);
       if (!q) { finishGame(); return; } // pools emptied by a live filter change
       setActiveQuestions(prev => [...prev, q]);
       setWaitingForBonus(false);
@@ -171,12 +189,7 @@ export default function SoloPlay() {
 
     if (user) {
       try {
-        const score = results.reduce((sum, r) => {
-          if (r.result === 'correct' && r.type === 'TOSSUP') return sum + 4;
-          if (r.result === 'correct' && r.type === 'BONUS') return sum + 10;
-          if (r.result === 'interrupt_wrong') return sum - 4;
-          return sum;
-        }, 0);
+        const score = calculateScore(results, { powers: !!settings.powers });
 
         const existing = await base44.entities.UserStats.filter({ user_email: user.email }, '-created_date', 1);
         const stats = existing[0];
@@ -226,6 +239,10 @@ export default function SoloPlay() {
           date: new Date().toISOString(),
           notes: '',
           subjects_played: settings.subjects || [],
+          // `powers` above is the count of correct interrupts; this records
+          // whether they were *scored* as powers (+6) in this game.
+          powers_enabled: !!settings.powers,
+          boss_ups: !!settings.boss_ups,
         };
         const gameHistory = [...(stats?.game_history || []), newGame].slice(-50);
         const roundsPlayed = [...new Set([...(stats?.rounds_played || []), selectedRoundId].filter(Boolean))];
@@ -280,6 +297,9 @@ export default function SoloPlay() {
           hideLeaderboard={gameState === 'abandoned'}
           isPartial={gameState === 'abandoned'}
           sessionId={sessionId}
+          powers={!!settings.powers}
+          bossUps={!!settings.boss_ups}
+          positionLabels={resultLabels}
         />
       </div>
     );
@@ -307,6 +327,8 @@ export default function SoloPlay() {
                 question={currentQuestion}
                 questionIndex={currentIndex}
                 totalQuestions={isMarathon ? Infinity : activeQuestions.length}
+                positionLabel={positionLabel}
+                totalPositions={isMarathon ? Infinity : positions.totalPairs}
                 settings={settings}
                 onAnswer={handleAnswer}
                 onNext={handleNext}
@@ -324,6 +346,8 @@ export default function SoloPlay() {
               results={results}
               playerName={user?.full_name || 'You'}
               questions={results.map(r => activeQuestions[r.questionIndex])}
+              powers={!!settings.powers}
+              positionLabels={resultLabels}
             />
             {isMarathon && (
               <p className="text-xs text-muted-foreground mt-2 text-center">

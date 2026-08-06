@@ -2,7 +2,6 @@ import { NextResponse } from 'next/server';
 import { requireUser, errorResponse } from '@server/auth';
 import { getEntity } from '@server/db';
 import { claimBuzz, ARBITRATION_WINDOW_MS } from '@server/buzz';
-import { broadcastPatch } from '@server/realtime';
 
 // Buzz claim with latency-compensated arbitration.
 //
@@ -47,10 +46,11 @@ export async function POST(request, { params }) {
       return NextResponse.json({ message: 'Session not found' }, { status: 404 });
     }
 
-    // One broadcast per window, from the winner's request, carrying only the
-    // field that changed.
+    // The lock itself is broadcast by the arbitration window (server/buzz.js):
+    // provisionally the instant the first claim lands, then authoritatively the
+    // moment the window closes — so no client is waiting on this response to
+    // find out the question is taken.
     if (outcome.winnerId === player_id) {
-      broadcastPatch('GameSession', id, { buzz_state: outcome.session.buzz_state });
       return NextResponse.json({
         ...outcome.session,
         buzz_margin_ms: outcome.marginMs,

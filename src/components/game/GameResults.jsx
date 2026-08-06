@@ -1,19 +1,17 @@
+import { useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Trophy, RotateCcw, Home, BookOpen } from 'lucide-react';
-import { SCORING, SUBJECT_COLORS } from '@/utils/parseRound';
+import { Trophy, RotateCcw, Home, BookOpen, Eye } from 'lucide-react';
+import { SUBJECT_COLORS, SCORING, calculateScore, pointsFor, submittedText } from '@/utils/parseRound';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
 import PostGameActions from '@/components/game/PostGameActions';
+import QuestionReviewDialog from '@/components/game/QuestionReviewDialog';
 
-export default function GameResults({ results = [], questions = [], onReplay, roundTitle, mode = 'solo', subjectsFilter = [], hideLeaderboard = false, isPartial = false, sessionId = null }) {
-  const score = results.reduce((sum, r) => {
-    if (r.result === 'correct' && r.type === 'TOSSUP') return sum + SCORING.TOSSUP_CORRECT;
-    if (r.result === 'correct' && r.type === 'BONUS') return sum + SCORING.BONUS_CORRECT;
-    if (r.result === 'interrupt_wrong') return sum + SCORING.TOSSUP_INTERRUPT_WRONG;
-    return sum;
-  }, 0);
+export default function GameResults({ results = [], questions = [], onReplay, roundTitle, mode = 'solo', subjectsFilter = [], hideLeaderboard = false, isPartial = false, sessionId = null, powers = false, bossUps = false, positionLabels = null }) {
+  const [reviewIndex, setReviewIndex] = useState(null);
+  const score = calculateScore(results, { powers });
 
   const correct = results.filter(r => r.result === 'correct').length;
   const wrong = results.filter(r => r.result === 'wrong' || r.result === 'interrupt_wrong').length;
@@ -30,9 +28,7 @@ export default function GameResults({ results = [], questions = [], onReplay, ro
     if (!subjectResults[s]) subjectResults[s] = { correct: 0, total: 0, points: 0 };
     subjectResults[s].total++;
     if (r.result === 'correct') subjectResults[s].correct++;
-    if (r.result === 'correct' && r.type === 'TOSSUP') subjectResults[s].points += 4;
-    if (r.result === 'correct' && r.type === 'BONUS') subjectResults[s].points += 10;
-    if (r.result === 'interrupt_wrong') subjectResults[s].points -= 4;
+    subjectResults[s].points += pointsFor(r.result, r.type, { interrupted: r.interrupted, powers });
   });
 
   return (
@@ -71,7 +67,9 @@ export default function GameResults({ results = [], questions = [], onReplay, ro
               </div>
               <div>
                 <p className="text-2xl font-bold text-primary">{correctInterrupts}</p>
-                <p className="text-xs text-muted-foreground">Power Buzzes</p>
+                <p className="text-xs text-muted-foreground">
+                  {powers ? `Powers (+${SCORING.TOSSUP_POWER} ea.)` : 'Power Buzzes'}
+                </p>
               </div>
             </div>
           </CardContent>
@@ -122,13 +120,20 @@ export default function GameResults({ results = [], questions = [], onReplay, ro
         <Card className="border-border/60">
           <CardHeader className="pb-3">
             <CardTitle className="text-base">Question Review</CardTitle>
+            <p className="text-xs text-muted-foreground">Click a question to see it in full</p>
           </CardHeader>
           <CardContent className="space-y-2 max-h-80 overflow-y-auto">
             {results.map((r, i) => {
               const q = questions[i];
               if (!q) return null;
+              const submitted = submittedText(r, q);
               return (
-                <div key={i} className="flex items-start gap-3 py-2 border-b border-border last:border-0">
+                <button
+                  key={i}
+                  type="button"
+                  onClick={() => setReviewIndex(i)}
+                  className="w-full flex items-start gap-3 py-2 border-b border-border last:border-0 text-left group hover:bg-muted/40 rounded-md px-1 -mx-1 transition-colors"
+                >
                   <div className={`w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5 text-xs font-bold ${
                     r.result === 'correct' ? 'bg-emerald-500/20 text-emerald-600' :
                     r.result === 'interrupt_wrong' ? 'bg-orange-500/20 text-orange-600' :
@@ -138,20 +143,50 @@ export default function GameResults({ results = [], questions = [], onReplay, ro
                     {r.result === 'correct' ? '✓' : r.result === 'timeout' ? '–' : '✗'}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <p className="text-xs font-medium truncate">{q.question_text?.slice(0, 80)}…</p>
-                    <p className="text-xs text-muted-foreground">Answer: <span className="text-foreground">{q.answer}</span></p>
+                    <p className="text-xs font-medium truncate">
+                      {positionLabels?.[i] && (
+                        <span className="text-muted-foreground font-normal tabular-nums">Q{positionLabels[i]} · </span>
+                      )}
+                      {q.question_text?.slice(0, 80)}…
+                    </p>
+                    {/* Your answer vs the right one — and, when the clock ran
+                        out, that no answer was ever given. */}
+                    {submitted ? (
+                      <p className="text-xs text-muted-foreground truncate">
+                        You said:{' '}
+                        <span className={r.result === 'correct'
+                          ? 'text-emerald-600 dark:text-emerald-400 font-medium'
+                          : 'text-destructive font-medium'}>
+                          {submitted}
+                        </span>
+                      </p>
+                    ) : (
+                      <p className="text-xs text-muted-foreground/60 italic">No answer given</p>
+                    )}
+                    <p className="text-xs text-muted-foreground truncate">Answer: <span className="text-foreground">{q.answer}</span></p>
                   </div>
+                  <Eye className="w-3.5 h-3.5 text-muted-foreground/0 group-hover:text-muted-foreground transition-colors flex-shrink-0 mt-0.5" />
                   <Badge variant="outline" className="text-xs flex-shrink-0">{q.type}</Badge>
-                </div>
+                </button>
               );
             })}
           </CardContent>
+
+          <QuestionReviewDialog
+            open={reviewIndex !== null}
+            onOpenChange={(v) => !v && setReviewIndex(null)}
+            question={reviewIndex !== null ? questions[reviewIndex] : null}
+            questionNumber={reviewIndex !== null ? reviewIndex + 1 : null}
+            questionLabel={reviewIndex !== null ? positionLabels?.[reviewIndex] : null}
+            entry={reviewIndex !== null ? results[reviewIndex] : null}
+            powers={powers}
+          />
         </Card>
       </motion.div>
 
       {/* Post-game actions: leaderboard + CSV + notes */}
       <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }}>
-        <PostGameActions results={results} questions={questions} roundTitle={roundTitle} score={score} mode={mode} subjectsFilter={subjectsFilter} hideLeaderboard={hideLeaderboard} sessionId={sessionId} />
+        <PostGameActions results={results} questions={questions} roundTitle={roundTitle} score={score} mode={mode} subjectsFilter={subjectsFilter} hideLeaderboard={hideLeaderboard} sessionId={sessionId} powers={powers} bossUps={bossUps} />
       </motion.div>
 
       {/* Nav actions */}

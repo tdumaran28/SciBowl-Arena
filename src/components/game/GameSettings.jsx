@@ -5,14 +5,17 @@ import { Switch } from '@/components/ui/switch';
 import { Slider } from '@/components/ui/slider';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
-import { Settings2, Volume2, Zap, Clock } from 'lucide-react';
-import { SUBJECTS } from '@/utils/parseRound';
+import { Settings2, Volume2, Zap, Clock, Sparkles, Swords } from 'lucide-react';
+import { SUBJECTS, SCORING, BOSS_UP_EXTRA_SECONDS } from '@/utils/parseRound';
+import { cn } from '@/lib/utils';
 
 const DEFAULT_SETTINGS = {
   read_aloud: false,
   wpm: 250,
   timed: true,
   buzz_time: 5, // seconds to buzz after Q finishes (5–20)
+  powers: false, // house rule: correct interrupt is worth SCORING.TOSSUP_POWER
+  boss_ups: false, // house rule: bonuses are read as open tossups
   skip_bonuses: false,
   subjects: [],
   question_types: ['TOSSUP', 'BONUS'],
@@ -104,10 +107,45 @@ export default function GameSettings({ settings = DEFAULT_SETTINGS, onChange, on
           </div>
         )}
 
-        {/* Skip Bonuses */}
+        {/* Powers — a house rule, so games using it score as custom games */}
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <Label className="text-sm font-medium flex items-center gap-2">
+              <Sparkles className="w-3.5 h-3.5 text-primary" /> Powers
+            </Label>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Correct interrupt is worth +{SCORING.TOSSUP_POWER} instead of +{SCORING.TOSSUP_CORRECT}
+              {' '}· posts to the Custom Games leaderboard
+            </p>
+          </div>
+          <Switch checked={!!s.powers} onCheckedChange={v => update('powers', v)} />
+        </div>
+
+        {/* Boss-ups — bonuses played as open tossups */}
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <Label className="text-sm font-medium flex items-center gap-2">
+              <Swords className="w-3.5 h-3.5 text-primary" /> Boss-ups
+            </Label>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Bonuses are still read, but as tossups: open to everyone, interrupts and negs
+              apply, tossup scoring, +{BOSS_UP_EXTRA_SECONDS}s to buzz
+            </p>
+          </div>
+          <Switch checked={!!s.boss_ups} onCheckedChange={v => update('boss_ups', v)} />
+        </div>
+
+        {/* Skip Bonuses — nothing to skip once bonuses are being played as boss-ups */}
         <div className="flex items-center justify-between">
-          <Label className="text-sm font-medium">Skip Bonus Questions</Label>
-          <Switch checked={s.skip_bonuses} onCheckedChange={v => update('skip_bonuses', v)} />
+          <Label className={cn('text-sm font-medium', s.boss_ups && 'text-muted-foreground')}>
+            Skip Bonus Questions
+            {s.boss_ups && <span className="font-normal"> · off while boss-ups are on</span>}
+          </Label>
+          <Switch
+            checked={!s.boss_ups && s.skip_bonuses}
+            disabled={!!s.boss_ups}
+            onCheckedChange={v => update('skip_bonuses', v)}
+          />
         </div>
 
         {/* Subject Filter */}

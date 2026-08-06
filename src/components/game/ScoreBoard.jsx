@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Trophy, Eye } from 'lucide-react';
-import { SCORING } from '@/utils/parseRound';
+import { calculateScore, pointsFor } from '@/utils/parseRound';
 import QuestionReviewDialog from '@/components/game/QuestionReviewDialog';
 
 /**
@@ -10,16 +10,16 @@ import QuestionReviewDialog from '@/components/game/QuestionReviewDialog';
  *                   When supplied, each row opens the question for review —
  *                   these are all already-answered questions, so no live
  *                   answer is exposed.
+ * @param powers     Power scoring enabled for this game.
+ * @param positionLabels  Pair-numbered labels ("1.T", "1.B"), index-aligned
+ *                   with `results`. The caller owns the numbering because only
+ *                   it holds the whole question list. Falls back to a running
+ *                   count when absent.
  */
-export default function ScoreBoard({ results = [], playerName = 'You', compact = false, questions = null }) {
+export default function ScoreBoard({ results = [], playerName = 'You', compact = false, questions = null, powers = false, positionLabels = null }) {
   const [reviewIndex, setReviewIndex] = useState(null);
   const canReview = Array.isArray(questions) && questions.length > 0;
-  const score = results.reduce((sum, r) => {
-    if (r.result === 'correct' && r.type === 'TOSSUP') return sum + SCORING.TOSSUP_CORRECT;
-    if (r.result === 'correct' && r.type === 'BONUS') return sum + SCORING.BONUS_CORRECT;
-    if (r.result === 'interrupt_wrong') return sum + SCORING.TOSSUP_INTERRUPT_WRONG;
-    return sum;
-  }, 0);
+  const score = calculateScore(results, { powers });
 
   const correct = results.filter(r => r.result === 'correct').length;
   const wrong = results.filter(r => r.result === 'wrong' || r.result === 'interrupt_wrong').length;
@@ -73,6 +73,7 @@ export default function ScoreBoard({ results = [], playerName = 'You', compact =
               <p className="text-[10px] text-muted-foreground/70 pb-1">Click a question to review it</p>
             )}
             {results.map((r, i) => {
+              const pts = pointsFor(r.result, r.type, { interrupted: r.interrupted, powers });
               const badge = (
                 <Badge
                   variant="outline"
@@ -82,11 +83,17 @@ export default function ScoreBoard({ results = [], playerName = 'You', compact =
                     'text-muted-foreground'
                   }`}
                 >
-                  {r.result === 'correct' ? `+${r.type === 'TOSSUP' ? SCORING.TOSSUP_CORRECT : SCORING.BONUS_CORRECT}` :
-                   r.result === 'interrupt_wrong' ? `${SCORING.TOSSUP_INTERRUPT_WRONG}` : '0'}
+                  {pts > 0 ? `+${pts}` : pts}
                 </Badge>
               );
-              const label = <span className="text-muted-foreground">Q{i + 1} · {r.type}</span>;
+              // Timed-out questions read as a plain "0" otherwise, which is
+              // exactly how a wrong answer reads — call it out.
+              const label = (
+                <span className="text-muted-foreground">
+                  Q{positionLabels?.[i] ?? `${i + 1} · ${r.type}`}
+                  {r.result === 'timeout' && <span className="text-muted-foreground/60"> · no answer</span>}
+                </span>
+              );
 
               if (!canReview) {
                 return (
@@ -118,7 +125,9 @@ export default function ScoreBoard({ results = [], playerName = 'You', compact =
           onOpenChange={(v) => !v && setReviewIndex(null)}
           question={reviewIndex !== null ? questions[reviewIndex] : null}
           questionNumber={reviewIndex !== null ? reviewIndex + 1 : null}
+          questionLabel={reviewIndex !== null ? positionLabels?.[reviewIndex] : null}
           entry={reviewIndex !== null ? results[reviewIndex] : null}
+          powers={powers}
         />
       )}
     </Card>

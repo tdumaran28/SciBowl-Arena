@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { requireUser, errorResponse } from '@server/auth';
-import { applyAdvance, applyStart, applyDead, applyReturnToLobby } from '@server/match';
+import { applyAdvance, applyStart, applyDead, applyReturnToLobby, applyStaleBuzzRelease } from '@server/match';
 import { cancelWindow } from '@server/buzz';
 import { broadcastPatch } from '@server/realtime';
 
@@ -9,10 +9,11 @@ import { broadcastPatch } from '@server/realtime';
 // it client-side made the whole match inherit that machine's clock error.
 //
 // action:
-//   start   — begin the match at question 0
-//   next    — move to `next_index` (or finish when `finished`)
-//   dead    — tossup timed out / everyone missed it
-//   lobby   — return to selection with the same players (host: play another round)
+//   start         — begin the match at question 0
+//   next          — move to `next_index` (or finish when `finished`)
+//   dead          — tossup timed out / everyone missed it
+//   release_buzz  — a held buzz went stale (the holder never answered)
+//   lobby         — return to selection with the same players (host: play another round)
 export async function POST(request, { params }) {
   const { id } = await params;
   const { error } = await requireUser();
@@ -38,6 +39,15 @@ export async function POST(request, { params }) {
         break;
       case 'dead':
         outcome = applyDead(id, { isBonus: !!body.is_bonus });
+        break;
+      case 'release_buzz':
+        // Reported by any client when a buzz has been held far past the answer
+        // window — the holder's tab froze or went away. Self-guarding, so a
+        // report that races a real answer is a no-op.
+        outcome = applyStaleBuzzRelease(id, {
+          isBonus: !!body.is_bonus,
+          questionFormat: body.question_format || '',
+        });
         break;
       case 'lobby':
         cancelWindow(id);

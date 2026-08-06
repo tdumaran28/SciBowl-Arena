@@ -3,8 +3,9 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
 import Link from 'next/link';
-import { Eye, Play, Pencil, Trash2, Atom, FileText, Globe, Lock, CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
+import { Eye, Play, Pencil, Trash2, Atom, FileText, FileDown, Globe, Lock, CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
 import { SUBJECT_COLORS } from '@/utils/parseRound';
+import { exportRoundsAsPdf } from '@/utils/exportPacketPdf';
 import { motion } from 'framer-motion';
 import { useRoundPermissions } from './RoundPermissions';
 
@@ -94,6 +95,16 @@ export default function RoundCard({ round, onPreview, onEdit, onDelete, onToggle
                 <Play className="w-3 h-3 mr-1" /> Play
               </Button>
             </Link>
+            <Button
+              size="sm"
+              variant="outline"
+              className="px-2"
+              title="Export as a printable Science Bowl packet (PDF)"
+              onClick={() => exportRoundsAsPdf(round)}
+              disabled={round.parse_status !== 'success'}
+            >
+              <FileDown className="w-3 h-3" />
+            </Button>
             {canManage && (
               <>
                 <Button size="sm" variant="outline" className="px-2" onClick={() => onEdit(round)}>

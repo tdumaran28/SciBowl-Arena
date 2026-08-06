@@ -44,8 +44,38 @@ export async function removeMany(type, filter) {
   return useSupabase(type) ? sb.removeMany(type, filter) : local.deleteManyEntities(type, filter);
 }
 
+/**
+ * Dashboard aggregates.
+ *
+ * UserStats only records solo play, so counting games and answers from it alone
+ * reported zero for every multiplayer match ever played. Sessions are the other
+ * half and they always live in the local store (they are ephemeral realtime
+ * state), so both halves are added here rather than in either backend.
+ */
 export async function statsAggregates() {
-  if (sb.enabled) return sb.statsAggregates();
+  const base = sb.enabled ? await sb.statsAggregates() : localUserAggregates();
+
+  const multiplayer = local.listEntities('GameSession', { filter: { mode: 'multiplayer' } });
+  // A room that plays several rounds without closing counts once — an
+  // undercount, but every one of these is a game that really happened.
+  const multiplayerGames = multiplayer.filter(s => s.status === 'finished').length;
+  const multiplayerAnswers = multiplayer.reduce((n, s) => n + (s.question_results?.length || 0), 0);
+
+  // Everyone who has signed in has an AppUser row (server/users.js), which is a
+  // truer "players" count than "people who have finished a solo game" — but
+  // take the larger of the two, so a deployment whose app_users table predates
+  // this doesn't report fewer players than it has stats for.
+  const registered = await count('AppUser').catch(() => 0);
+
+  return {
+    ...base,
+    games_played: (base.games_played || 0) + multiplayerGames,
+    questions_answered: (base.questions_answered || 0) + multiplayerAnswers,
+    players: Math.max(base.players || 0, registered || 0),
+  };
+}
+
+function localUserAggregates() {
   const stats = local.listEntities('UserStats');
   return {
     games_played: stats.reduce((s, r) => s + (r.total_games || 0), 0),

@@ -523,25 +523,149 @@ function levenshtein(a, b) {
 /**
  * Science Bowl scoring
  * Tossup correct: +4 (MC), +4 (SA)
- * Tossup interrupt correct: +4
+ * Tossup interrupt correct: +4 — or TOSSUP_POWER when powers are enabled
  * Tossup interrupt wrong: -4
  * Bonus correct: +10
  * No penalty for not buzzing
+ *
+ * Powers are an optional house rule: answering a tossup correctly before the
+ * reading finishes is worth TOSSUP_POWER instead of the usual +4. Official
+ * Science Bowl has no such award, so games played with it are scored as custom
+ * games (see PostGameActions / LeaderboardSection).
  */
 export const SCORING = {
   TOSSUP_CORRECT: 4,
+  TOSSUP_POWER: 6,
   TOSSUP_INTERRUPT_WRONG: -4,
   BONUS_CORRECT: 10,
   BONUS_WRONG: 0,
 };
 
-export function calculateScore(results) {
-  return results.reduce((sum, r) => {
-    if (r.result === 'correct' && r.type === 'TOSSUP') return sum + SCORING.TOSSUP_CORRECT;
-    if (r.result === 'interrupt_wrong') return sum + SCORING.TOSSUP_INTERRUPT_WRONG;
-    if (r.result === 'correct' && r.type === 'BONUS') return sum + SCORING.BONUS_CORRECT;
-    return sum;
-  }, 0);
+/**
+ * Points for a single answered question. The one place that knows the rules —
+ * scoreboards, results screens, the review dialog and the CSV export all go
+ * through it so a rule change (like powers) can't apply in some views only.
+ *
+ * @param result       'correct' | 'wrong' | 'interrupt_wrong' | 'timeout' | 'dead'
+ * @param type         'TOSSUP' | 'BONUS'
+ * @param interrupted  answered before the reading finished
+ * @param powers       power scoring enabled for this game
+ */
+export function pointsFor(result, type, { interrupted = false, powers = false } = {}) {
+  if (result === 'correct') {
+    if (type === 'BONUS') return SCORING.BONUS_CORRECT;
+    return powers && interrupted ? SCORING.TOSSUP_POWER : SCORING.TOSSUP_CORRECT;
+  }
+  if (result === 'interrupt_wrong') return SCORING.TOSSUP_INTERRUPT_WRONG;
+  return 0;
+}
+
+/**
+ * What a player submitted for a question, as display text. Multiple choice
+ * renders as the option picked ("X) 4.2 joules") rather than the bare letter or
+ * the raw keystrokes, so it reads the same whether they clicked or typed.
+ * Returns null when nothing was submitted (the clock ran out) — callers show
+ * "No answer given" for that case rather than an empty string.
+ */
+export function submittedText(entry, question) {
+  if (!entry) return null;
+  const letter = entry.submitted_choice;
+  if (letter && question?.choices?.[letter]) return `${letter}) ${question.choices[letter]}`;
+  if (letter) return letter;
+  const raw = entry.submitted_answer;
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : null;
+}
+
+export function calculateScore(results, { powers = false } = {}) {
+  return results.reduce(
+    (sum, r) => sum + pointsFor(r.result, r.type, { interrupted: r.interrupted, powers }),
+    0,
+  );
+}
+
+/**
+ * Boss-ups: play a bonus as if it were a tossup. The question is still read,
+ * but it is open to everyone from the first word — interrupts, powers and negs
+ * all apply — and it scores like a tossup rather than +10.
+ *
+ * Done by rewriting the question's type rather than threading a flag through
+ * the reader, the scorer and the bonus-ownership rules: every one of those
+ * already does the right thing for a TOSSUP, and a second code path through
+ * them is how the two drift apart. `boss_up` is kept for display and for the
+ * longer buzz window.
+ */
+export function asBossUp(q) {
+  if (!q || q.type !== 'BONUS') return q;
+  return { ...q, type: 'TOSSUP', boss_up: true, original_type: 'BONUS' };
+}
+
+/** Extra seconds to buzz on a boss-up, over the tossup window. */
+export const BOSS_UP_EXTRA_SECONDS = 10;
+
+/**
+ * The question list a game actually plays: subject filter, then either
+ * boss-ups or skipped bonuses. Shared by solo and multiplayer so both derive
+ * the same list from the same settings — in multiplayer they must, since every
+ * client indexes into its own copy.
+ */
+export function applyQuestionRules(questions, settings) {
+  let qs = questions || [];
+  if (settings?.subjects?.length > 0) qs = qs.filter(q => settings.subjects.includes(q.subject));
+  // Boss-ups win over skipping: turning bonuses into tossups and then dropping
+  // them would leave nothing to convert.
+  if (settings?.boss_ups) return qs.map(asBossUp);
+  if (settings?.skip_bonuses) qs = qs.filter(q => q.type === 'TOSSUP');
+  return qs;
+}
+
+/**
+ * Position labels for a question list, counted the way a packet is written:
+ * a tossup and the bonus that follows it are one numbered pair, so 46 questions
+ * are 23 pairs. Tossups read "12.T", bonuses "12.B" — and a boss-up is still a
+ * bonus for numbering, whatever its type was rewritten to, because it occupies
+ * the same slot in the packet.
+ *
+ * Derived from position rather than from `number`: parsed packets number
+ * inconsistently, and a filtered list (subject filter, skipped bonuses) has to
+ * come out contiguous anyway.
+ *
+ * @returns {{ labels: string[], totalPairs: number }} labels index-aligned with
+ *          `questions`.
+ */
+export function pairPositions(questions = []) {
+  const labels = [];
+  let pair = 0;
+  for (const q of questions) {
+    // A boss-up reports type TOSSUP; original_type is what the packet had.
+    const isBonus = (q?.original_type || q?.type) === 'BONUS';
+    if (isBonus) {
+      // A packet that opens on a bonus (or a bonus-only filter) still starts at 1.
+      if (pair === 0) pair = 1;
+    } else {
+      pair++;
+    }
+    labels.push(`${pair}.${isBonus ? 'B' : 'T'}`);
+  }
+  return { labels, totalPairs: pair };
+}
+
+/**
+ * Multiplayer: how many wrong answers kill a tossup, by format.
+ * A multiple-choice question is guessable — after two wrong answers the field
+ * is narrow enough that the next team would be picking between two options —
+ * so it locks out earlier than short answer.
+ *
+ * The server enforces this (server/match.js keeps a matching copy, since it
+ * can't import browser code); this copy lets the UI show the lockout the
+ * moment the answer lands rather than waiting for the round trip.
+ */
+export const DEAD_AFTER_WRONG = {
+  'Multiple Choice': 2,
+  DEFAULT: 3,
+};
+
+export function wrongLimitFor(format) {
+  return DEAD_AFTER_WRONG[format] ?? DEAD_AFTER_WRONG.DEFAULT;
 }
 
 export const SUBJECTS = [

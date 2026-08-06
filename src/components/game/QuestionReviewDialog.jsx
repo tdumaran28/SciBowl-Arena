@@ -1,6 +1,6 @@
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Badge } from '@/components/ui/badge';
-import { SUBJECT_COLORS, SCORING } from '@/utils/parseRound';
+import { SUBJECT_COLORS, pointsFor, submittedText } from '@/utils/parseRound';
 import { CheckCircle2, XCircle, Clock, Zap } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -14,33 +14,38 @@ const RESULT_META = {
   wrong: { icon: XCircle, label: 'Wrong', tone: 'text-destructive' },
   timeout: { icon: Clock, label: 'No answer', tone: 'text-muted-foreground' },
   neg: { icon: Zap, label: 'Neg', tone: 'text-destructive' },
+  dead: { icon: Clock, label: 'Dead — no answer', tone: 'text-muted-foreground' },
 };
 
-function pointsFor(result, type) {
-  if (result === 'correct') return type === 'BONUS' ? SCORING.BONUS_CORRECT : SCORING.TOSSUP_CORRECT;
-  if (result === 'interrupt_wrong') return SCORING.TOSSUP_INTERRUPT_WRONG;
-  return 0;
-}
-
 /**
- * @param entry  Optional result/log record for the question — shows what
- *               happened (who answered, points). Omit for a plain read-back.
+ * @param entry   Optional result/log record for the question — shows what was
+ *                submitted, whether it was right, and the points. Omit for a
+ *                plain read-back.
+ * @param powers  Power scoring was enabled for this game (affects the points
+ *                shown for a correct interrupt).
+ * @param questionLabel  Pair-numbered position ("1.B"). Preferred over
+ *                questionNumber, which counts questions rather than pairs.
  */
-export default function QuestionReviewDialog({ open, onOpenChange, question, questionNumber, entry = null }) {
+export default function QuestionReviewDialog({ open, onOpenChange, question, questionNumber, entry = null, powers = false, questionLabel = null }) {
   const meta = entry?.result ? RESULT_META[entry.result] : null;
   const Icon = meta?.icon;
   const isMC = question?.format === 'Multiple Choice';
   const correctLetter = question?.answer?.toUpperCase().replace(/^([WXYZ])[).\s].*/, '$1').trim();
+  const submitted = submittedText(entry, question);
+  const answeredCorrectly = entry?.result === 'correct';
+  const pickedLetter = entry?.submitted_choice || null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 flex-wrap text-base">
-            {questionNumber != null && <span>Question {questionNumber}</span>}
+            {(questionLabel || questionNumber != null) && (
+              <span>Question {questionLabel ?? questionNumber}</span>
+            )}
             {question?.type && (
               <Badge variant={question.type === 'BONUS' ? 'secondary' : 'default'} className="text-xs">
-                {question.type}
+                {question.boss_up ? 'BOSS-UP' : question.type}
               </Badge>
             )}
             {question?.subject && (
@@ -74,7 +79,9 @@ export default function QuestionReviewDialog({ open, onOpenChange, question, que
                       'flex gap-2 text-sm rounded-lg border px-3 py-2',
                       letter === correctLetter
                         ? 'border-emerald-500/40 bg-emerald-500/10'
-                        : 'border-border',
+                        : letter === pickedLetter
+                          ? 'border-destructive/40 bg-destructive/10'
+                          : 'border-border',
                     )}
                   >
                     <span className="font-bold text-muted-foreground">{letter})</span>
@@ -82,8 +89,53 @@ export default function QuestionReviewDialog({ open, onOpenChange, question, que
                     {letter === correctLetter && (
                       <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 ml-auto flex-shrink-0" />
                     )}
+                    {letter === pickedLetter && letter !== correctLetter && (
+                      <XCircle className="w-4 h-4 text-destructive ml-auto flex-shrink-0" />
+                    )}
                   </div>
                 ))}
+              </div>
+            )}
+
+            {/* What was submitted. A wrong answer and no answer at all score the
+                same, so the review has to distinguish them explicitly. */}
+            {entry && (
+              <div
+                className={cn(
+                  'rounded-lg border p-3',
+                  submitted
+                    ? answeredCorrectly
+                      ? 'border-emerald-500/30 bg-emerald-500/5'
+                      : 'border-destructive/30 bg-destructive/5'
+                    : 'border-border bg-muted/40',
+                )}
+              >
+                <p className="text-xs font-medium text-muted-foreground mb-1">
+                  {entry.player ? `${entry.player}'s answer` : 'Your answer'}
+                </p>
+                {submitted ? (
+                  <p className="flex items-center gap-2 text-sm font-semibold">
+                    {answeredCorrectly
+                      ? <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 flex-shrink-0" />
+                      : <XCircle className="w-4 h-4 text-destructive flex-shrink-0" />}
+                    <span className={answeredCorrectly
+                      ? 'text-emerald-700 dark:text-emerald-400'
+                      : 'text-destructive'}>
+                      {submitted}
+                    </span>
+                    <span className={cn(
+                      'text-xs font-normal',
+                      answeredCorrectly ? 'text-emerald-700/70 dark:text-emerald-400/70' : 'text-destructive/70',
+                    )}>
+                      · {answeredCorrectly ? 'correct' : 'incorrect'}
+                    </span>
+                  </p>
+                ) : (
+                  <p className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <Clock className="w-4 h-4 flex-shrink-0" />
+                    No answer given
+                  </p>
+                )}
               </div>
             )}
 
@@ -106,7 +158,10 @@ export default function QuestionReviewDialog({ open, onOpenChange, question, que
                 )}
                 <Badge variant="outline" className="ml-auto tabular-nums">
                   {(() => {
-                    const pts = entry.points ?? pointsFor(entry.result, entry.type || question.type);
+                    const pts = entry.points ?? pointsFor(entry.result, entry.type || question.type, {
+                      interrupted: entry.interrupted,
+                      powers,
+                    });
                     return `${pts > 0 ? '+' : ''}${pts} pts`;
                   })()}
                 </Badge>

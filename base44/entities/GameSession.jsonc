@@ -137,6 +137,38 @@
           "type": "boolean",
           "default": false
         },
+        "dead": {
+          "type": "boolean",
+          "default": false,
+          "description": "Nobody can win the question any more — timed out, everyone missed it, or it hit its wrong-answer limit"
+        },
+        "pending_buzz": {
+          "type": "object",
+          "description": "Provisional lock: a claim that has reached the server but not yet cleared arbitration. Broadcast immediately so every screen locks a network hop after the buzz; replaced by buzzed_player_id when the window closes",
+          "properties": {
+            "player_id": { "type": "string" },
+            "team": { "type": "string" },
+            "display_name": { "type": "string" },
+            "buzzed_at": { "type": "number" }
+          }
+        },
+        "dead_reason": {
+          "type": "string",
+          "description": "timeout | all_answered | wrong_limit"
+        },
+        "wrong_count": {
+          "type": "number",
+          "default": 0,
+          "description": "Wrong answers taken on this tossup"
+        },
+        "wrong_limit": {
+          "type": "number",
+          "description": "Wrong answers that kill it: 2 for Multiple Choice, 3 for Short Answer"
+        },
+        "question_format": {
+          "type": "string",
+          "description": "Format of the current question, reported by the answering client (the server holds no question list)"
+        },
         "bonus_for_team": {
           "type": "string"
         },
@@ -201,11 +233,22 @@
         "skip_bonuses": {
           "type": "boolean",
           "default": false
+        },
+        "powers": {
+          "type": "boolean",
+          "default": false,
+          "description": "House rule: a correct interrupt scores +6 instead of +4. Scored server-side (server/match.js)"
+        },
+        "boss_ups": {
+          "type": "boolean",
+          "default": false,
+          "description": "House rule: bonuses are read as open tossups (tossup scoring, interrupts allowed, +10s to buzz). Applied client-side by rewriting the question type — the server just sees tossups"
         }
       }
     },
     "question_results": {
       "type": "array",
+      "description": "Points log. Each entry: question_index, player, team, kind, points, type, interrupted, submitted_answer, submitted_choice, ts",
       "items": {
         "type": "object"
       }

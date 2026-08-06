@@ -7,13 +7,14 @@ import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { Progress } from '@/components/ui/progress';
-import { Upload, Search, BookOpen, CheckCircle, AlertCircle, Loader2, Plus, FileJson, ClipboardPaste, Globe, Lock, Shield } from 'lucide-react';
+import { Upload, Search, BookOpen, CheckCircle, AlertCircle, Loader2, Plus, FileJson, ClipboardPaste, Globe, Lock, Shield, FileDown } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { SUBJECT_COLORS, sortRoundsByNumber } from '@/utils/parseRound';
 import { extractTextFromFile } from '@/utils/extractText';
 import { parsePacket } from '@/utils/parsePacket';
 import { parseJsonPacket } from '@/utils/parseJsonPacket';
+import { exportRoundsAsPdf } from '@/utils/exportPacketPdf';
 import { toast } from 'sonner';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import RecentRounds from '@/components/database/RecentRounds';
@@ -440,6 +441,15 @@ export default function Database() {
           <DialogHeader>
             <DialogTitle>{previewRound?.title}</DialogTitle>
             <DialogDescription>{previewRound?.question_count} questions · {previewRound?.source}</DialogDescription>
+            <Button
+              variant="outline"
+              size="sm"
+              className="self-start mt-1"
+              onClick={() => exportRoundsAsPdf(previewRound)}
+              disabled={!previewRound?.questions?.length}
+            >
+              <FileDown className="w-3.5 h-3.5 mr-1.5" /> Export as PDF
+            </Button>
           </DialogHeader>
           <div className="overflow-y-auto flex-1 space-y-3 pr-2">
             {(previewRound?.questions || []).slice(0, 20).map((q, i) => (

@@ -17,6 +17,7 @@
 // see ARBITRATION_WINDOW_MS.
 
 import { getEntity, updateEntity } from './db.js';
+import { broadcastPatch } from './realtime.js';
 
 export const ARBITRATION_WINDOW_MS = 150;
 
@@ -48,30 +49,47 @@ function finishWindow(sessionId) {
   const winner = sorted[0];
 
   let session = getEntity('GameSession', sessionId);
+  // Whether the winner's buzz was actually recorded. If the question resolved
+  // while the window was open, nobody won it — reporting a winner anyway would
+  // leave that client holding a buzz the server never granted, free to answer a
+  // question that is already over.
+  let applied = false;
   if (session && winner) {
     const bs = session.buzz_state || {};
     // Re-check under the same synchronous critical section the claims were
     // validated in: the question may have resolved while the window was open.
     if (!bs.buzzed_player_id && !bs.result && !bs.dead) {
-      session = updateEntity('GameSession', sessionId, {
-        buzz_state: {
-          ...bs,
-          buzzed_player_id: winner.playerId,
-          buzzed_team: winner.team || '',
-          buzzed_display_name: winner.displayName,
-          buzzed_at: winner.buzzedAt,
-          result: null,
-          negged_teams: bs.negged_teams || [],
-          negged_players: bs.negged_players || [],
-          reading_started_at: bs.reading_started_at || null,
-        },
-      });
+      const buzz_state = {
+        ...bs,
+        buzzed_player_id: winner.playerId,
+        buzzed_team: winner.team || '',
+        buzzed_display_name: winner.displayName,
+        buzzed_at: winner.buzzedAt,
+        result: null,
+        // The provisional lock is now superseded by the arbitrated one.
+        pending_buzz: null,
+        negged_teams: bs.negged_teams || [],
+        negged_players: bs.negged_players || [],
+        reading_started_at: bs.reading_started_at || null,
+      };
+      session = updateEntity('GameSession', sessionId, { buzz_state });
+      applied = true;
+      // Broadcast from here rather than from the winning request's handler:
+      // every client learns the outcome as soon as the window closes, instead
+      // of after one more round trip to whichever player happened to win.
+      broadcastPatch('GameSession', sessionId, { buzz_state });
+    } else if (bs.pending_buzz) {
+      // Question resolved while the window was open — drop the provisional lock
+      // so it can't sit on everyone's screen.
+      const buzz_state = { ...bs, pending_buzz: null };
+      session = updateEntity('GameSession', sessionId, { buzz_state });
+      broadcastPatch('GameSession', sessionId, { buzz_state });
     }
   }
 
   win.resolve({
     session,
-    winnerId: winner?.playerId ?? null,
+    winnerId: applied ? winner.playerId : null,
     // Margin over the runner-up — surfaced in the UI so players can see how
     // close a buzz was, the way a real lockout box shows the lockout order.
     marginMs: sorted.length > 1 ? Math.round(sorted[1].buzzedAt - sorted[0].buzzedAt) : null,
@@ -100,7 +118,8 @@ export function claimBuzz(sessionId, { playerId, team, displayName, buzzedAt }) 
   const stamped = Number.isFinite(buzzedAt) ? buzzedAt : now;
   const clamped = Math.min(Math.max(stamped, readingStartedAt || stamped), now);
 
-  const win = windows.get(sessionId) || openWindow(sessionId);
+  const existing = windows.get(sessionId);
+  const win = existing || openWindow(sessionId);
   win.claims.push({
     playerId,
     team,
@@ -108,6 +127,29 @@ export function claimBuzz(sessionId, { playerId, team, displayName, buzzedAt }) 
     buzzedAt: clamped,
     receivedSeq: seq++,
   });
+
+  // First claim of a window: lock every other screen NOW rather than after the
+  // window closes. Waiting cost everyone ARBITRATION_WINDOW_MS plus a round
+  // trip of buzzable time on a question that was already taken.
+  //
+  // This does not decide anything — arbitration still runs on the stamped
+  // instants — and it cannot shut a rival out unfairly: a claim already in
+  // flight is unaffected, and a press made *after* this frame arrives is
+  // necessarily later than the pending buzz, so it would have lost anyway.
+  if (!existing) {
+    const buzz_state = {
+      ...bs,
+      pending_buzz: {
+        player_id: playerId,
+        team: team || '',
+        display_name: displayName,
+        buzzed_at: clamped,
+      },
+    };
+    updateEntity('GameSession', sessionId, { buzz_state });
+    broadcastPatch('GameSession', sessionId, { buzz_state });
+  }
+
   return win.promise;
 }
 

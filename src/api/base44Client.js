@@ -192,6 +192,12 @@ export const base44 = {
       request(`/api/sessions/${sessionId}/advance`, {
         method: 'POST', body: { action: 'dead', is_bonus },
       }),
+    // Release a buzz nobody ever answered (the holder's tab froze or went
+    // away). Guarded server-side, so any client may report it.
+    releaseBuzz: (sessionId, { is_bonus = false, question_format = '' } = {}) =>
+      request(`/api/sessions/${sessionId}/advance`, {
+        method: 'POST', body: { action: 'release_buzz', is_bonus, question_format },
+      }),
     returnToLobby: (sessionId, { round_id = '', game_type = null, reset_scores = true } = {}) =>
       request(`/api/sessions/${sessionId}/advance`, {
         method: 'POST', body: { action: 'lobby', round_id, game_type, reset_scores },

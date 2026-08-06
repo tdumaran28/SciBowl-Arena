@@ -16,14 +16,30 @@ import { getEntity, updateEntity } from './db.js';
 
 export const SCORING = {
   TOSSUP_CORRECT: 4,
+  // Optional house rule (session.settings.powers): a tossup answered correctly
+  // before the reading finished. Mirrors SCORING in src/utils/parseRound.js —
+  // keep the two in step.
+  TOSSUP_POWER: 6,
   TOSSUP_INTERRUPT_WRONG: -4,
   BONUS_CORRECT: 10,
 };
 
-function pointsFor({ result, type }) {
+// How many wrong answers kill a tossup. Multiple choice is guessable — with
+// four options, two wrong answers leave the field narrow enough that a third
+// team would be picking from two, so it locks a buzz earlier than short answer.
+export const DEAD_AFTER_WRONG = {
+  'Multiple Choice': 2,
+  DEFAULT: 3,
+};
+
+export function wrongLimitFor(format) {
+  return DEAD_AFTER_WRONG[format] ?? DEAD_AFTER_WRONG.DEFAULT;
+}
+
+function pointsFor({ result, type, interrupted, powers }) {
   const correct = result === 'correct';
   if (correct && type === 'BONUS') return SCORING.BONUS_CORRECT;
-  if (correct) return SCORING.TOSSUP_CORRECT;
+  if (correct) return powers && interrupted ? SCORING.TOSSUP_POWER : SCORING.TOSSUP_CORRECT;
   if (result === 'interrupt_wrong') return SCORING.TOSSUP_INTERRUPT_WRONG;
   return 0;
 }
@@ -33,7 +49,10 @@ function pointsFor({ result, type }) {
  * next buzz state (question resolved / bonus awarded / reopened for the
  * remaining teams).
  */
-export function applyAnswer(sessionId, { playerId, displayName, team, result, type, interrupted }) {
+export function applyAnswer(sessionId, {
+  playerId, displayName, team, result, type, interrupted,
+  submittedAnswer = null, submittedChoice = null, questionFormat = '',
+}) {
   const session = getEntity('GameSession', sessionId);
   if (!session) return null;
 
@@ -50,7 +69,8 @@ export function applyAnswer(sessionId, { playerId, displayName, team, result, ty
   const isCorrect = result === 'correct';
   const isNeg = result === 'interrupt_wrong';
   const isBonus = type === 'BONUS';
-  const pts = pointsFor({ result, type });
+  const powers = !!session.settings?.powers;
+  const pts = pointsFor({ result, type, interrupted, powers });
 
   const players = (session.players || []).map(p =>
     p.user_id === playerId ? { ...p, score: (p.score || 0) + pts } : p);
@@ -64,6 +84,11 @@ export function applyAnswer(sessionId, { playerId, displayName, team, result, ty
     kind: isCorrect ? 'correct' : isNeg ? 'neg' : 'wrong',
     points: pts,
     type,
+    interrupted: !!interrupted,
+    // Carried so the points log can show what was actually said, and tell a
+    // wrong answer apart from a question nobody answered.
+    submitted_answer: submittedAnswer ?? null,
+    submitted_choice: submittedChoice ?? null,
     ts: new Date().toISOString(),
   }];
 
@@ -99,11 +124,24 @@ export function applyAnswer(sessionId, { playerId, displayName, team, result, ty
       dead: false,
     };
   } else {
-    // Tossup missed: lock out this team/player and reopen for everyone else.
+    // Tossup missed: lock out this team/player and reopen for everyone else —
+    // unless the question has now taken enough wrong answers to be dead.
     const negged_teams = [...(bs.negged_teams || [])];
     if (team && !negged_teams.includes(team)) negged_teams.push(team);
     const negged_players = [...(bs.negged_players || [])];
     if (!negged_players.includes(playerId)) negged_players.push(playerId);
+
+    // Counted as attempts rather than derived from negged_players, so it holds
+    // in team play (where two players on locked-out teams are still two wrong
+    // answers) and doesn't miscount a player who somehow answers twice.
+    const wrong_count = (bs.wrong_count || 0) + 1;
+    const wrongLimit = wrongLimitFor(questionFormat || bs.question_format);
+    const rosterExhausted = (session.teams || []).length > 0
+      ? (session.teams || []).every(t => negged_teams.includes(t.name))
+      : (session.players || []).length > 0 &&
+        (session.players || []).every(p => negged_players.includes(p.user_id));
+    const dead = wrong_count >= wrongLimit || rosterExhausted;
+
     buzz_state = {
       buzzed_player_id: null, buzzed_team: null, buzzed_display_name: null,
       result: isNeg ? 'neg' : 'wrong',
@@ -112,13 +150,61 @@ export function applyAnswer(sessionId, { playerId, displayName, team, result, ty
       result_points: pts, result_interrupted: isNeg,
       bonus_for_team: null, bonus_for_player: null, bonus_for_player_id: null,
       negged_teams, negged_players,
+      wrong_count,
+      wrong_limit: wrongLimit,
+      question_format: questionFormat || bs.question_format || '',
       reading_started_at: bs.reading_started_at || null,
-      dead: false,
+      // Nobody can win it any more: no bonus is awarded and the room moves on.
+      dead,
+      dead_reason: dead
+        ? (wrong_count >= wrongLimit ? 'wrong_limit' : 'all_answered')
+        : null,
     };
   }
 
   const patch = { players, teams, buzz_state, question_results };
   return { session: updateEntity('GameSession', sessionId, patch), patch };
+}
+
+// How long a player may hold the buzz before any client may release it on their
+// behalf. The reader gives them 10s to answer; the rest is slack for the round
+// trip and for clock error between machines.
+export const ANSWER_GRACE_MS = 10_000;
+export const STALE_BUZZ_MS = ANSWER_GRACE_MS + 5_000;
+
+/**
+ * Release a buzz whose holder never answered — a closed laptop, a frozen tab, a
+ * dropped connection. Without this the room is locked out permanently: nobody
+ * else may buzz while a buzz is held, and the question can never resolve, so
+ * there is nothing left to click.
+ *
+ * Recorded as an unanswered attempt by that player, which is exactly what it
+ * was: they are locked out, it counts toward the wrong-answer limit, and the
+ * question reopens for everyone else (or dies, by the usual rules).
+ *
+ * Idempotent and self-guarding: every client reports, and a report that arrives
+ * after the player actually answered — or before the buzz is stale — does
+ * nothing.
+ */
+export function applyStaleBuzzRelease(sessionId, {
+  isBonus = false, questionFormat = '', now = Date.now(), staleMs = STALE_BUZZ_MS,
+} = {}) {
+  const session = getEntity('GameSession', sessionId);
+  if (!session) return null;
+  const bs = session.buzz_state || {};
+  if (!bs.buzzed_player_id || bs.result || bs.dead) return { session, patch: null };
+  const heldSince = bs.buzzed_at || bs.reading_started_at || 0;
+  if (heldSince && now - heldSince < staleMs) return { session, patch: null };
+
+  return applyAnswer(sessionId, {
+    playerId: bs.buzzed_player_id,
+    displayName: bs.buzzed_display_name || 'Player',
+    team: bs.buzzed_team || '',
+    result: 'timeout',
+    type: isBonus ? 'BONUS' : 'TOSSUP',
+    interrupted: false,
+    questionFormat: questionFormat || bs.question_format || '',
+  });
 }
 
 /** Tossup timer elapsed, or everyone has already missed it. */
@@ -140,10 +226,12 @@ export function applyDead(sessionId, { isBonus = false } = {}) {
       buzzed_player_id: null,
       buzzed_team: null,
       buzzed_display_name: null,
+      pending_buzz: null,
       // A timed-out bonus resolves as wrong: bonuses have no reopen semantics,
       // and without a result the match could never advance past it.
       result: (allAnswered || isBonus) ? 'wrong' : null,
       dead: true,
+      dead_reason: allAnswered ? 'all_answered' : 'timeout',
     },
   };
   return { session: updateEntity('GameSession', sessionId, patch), patch };

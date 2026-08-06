@@ -28,6 +28,14 @@ export async function POST(request, { params }) {
     // A room that empties out (or drops to a single player mid-match) is over.
     const status = players.length <= 1 && session.status === 'active' ? 'finished' : session.status;
     const patch = { players, status };
+
+    // Hand the room over when the host leaves. The host is the fallback that
+    // can always advance a question and end the game, so a room whose host
+    // walked out used to be one disconnect away from having nobody able to move
+    // it forward.
+    if (session.host_id === player_id && players.length > 0) {
+      patch.host_id = players[0].user_id;
+    }
     const updated = updateEntity('GameSession', id, patch);
     broadcastPatch('GameSession', id, patch);
     return NextResponse.json(updated);

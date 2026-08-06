@@ -48,7 +48,17 @@
     },
     "is_custom": {
       "type": "boolean",
-      "description": "True if subjects were filtered/customized",
+      "description": "True if subjects were filtered/customized, or a house rule (powers) was in play",
+      "default": false
+    },
+    "powers": {
+      "type": "boolean",
+      "description": "Game was scored with powers (correct interrupt worth +6). Always listed on the Custom Games leaderboard — power scores aren't comparable to standard ones",
+      "default": false
+    },
+    "boss_ups": {
+      "type": "boolean",
+      "description": "Game was played with bonuses as open tossups. Also always a Custom Games entry",
       "default": false
     },
     "mode": {

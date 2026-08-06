@@ -1,9 +1,31 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ChevronDown, ChevronRight, Folder, Calendar } from 'lucide-react';
+import { ChevronDown, ChevronRight, Folder, Calendar, FileDown } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import RoundCard from './RoundCard';
 import { sortRoundsByNumber } from '@/utils/parseRound';
+import { exportRoundsAsPdf } from '@/utils/exportPacketPdf';
+
+// Export a whole group (a source, or one year within it) as a single printable
+// document, one packet per page. Rounds that failed to parse have no questions
+// to print, so they are left out rather than emitted as empty pages.
+function ExportGroupButton({ rounds, documentTitle, label }) {
+  const printable = sortRoundsByNumber(rounds.filter(r => r.parse_status === 'success'));
+  return (
+    <Button
+      size="sm"
+      variant="ghost"
+      className="mr-1.5 px-2 flex-shrink-0 text-muted-foreground hover:text-foreground"
+      title={label}
+      aria-label={label}
+      disabled={printable.length === 0}
+      onClick={() => exportRoundsAsPdf(printable, { documentTitle })}
+    >
+      <FileDown className="w-3.5 h-3.5" />
+    </Button>
+  );
+}
 
 export default function SourceBrowser({ rounds, onPreview, onEdit, onDelete, onToggleVisibility }) {
   // Group by source, then by year
@@ -64,18 +86,25 @@ function SourceGroup({ sourceName, rounds, onPreview, onEdit, onDelete, onToggle
 
   return (
     <div className="border border-border/60 rounded-lg overflow-hidden bg-card">
-      <button
-        onClick={() => setOpen(!open)}
-        className="flex items-center gap-2 w-full px-3.5 py-3 hover:bg-accent/40 transition-colors text-left"
-      >
-        {open
-          ? <ChevronDown className="w-4 h-4 text-muted-foreground flex-shrink-0" />
-          : <ChevronRight className="w-4 h-4 text-muted-foreground flex-shrink-0" />}
-        <Folder className="w-4 h-4 text-primary flex-shrink-0" />
-        <span className="font-semibold text-sm truncate flex-1">{sourceName}</span>
-        <Badge variant="secondary" className="text-xs">{rounds.length}</Badge>
-        <span className="text-xs text-muted-foreground hidden sm:inline">{totalQuestions} Q</span>
-      </button>
+      <div className="flex items-center">
+        <button
+          onClick={() => setOpen(!open)}
+          className="flex items-center gap-2 flex-1 min-w-0 px-3.5 py-3 hover:bg-accent/40 transition-colors text-left"
+        >
+          {open
+            ? <ChevronDown className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+            : <ChevronRight className="w-4 h-4 text-muted-foreground flex-shrink-0" />}
+          <Folder className="w-4 h-4 text-primary flex-shrink-0" />
+          <span className="font-semibold text-sm truncate flex-1">{sourceName}</span>
+          <Badge variant="secondary" className="text-xs">{rounds.length}</Badge>
+          <span className="text-xs text-muted-foreground hidden sm:inline">{totalQuestions} Q</span>
+        </button>
+        <ExportGroupButton
+          rounds={rounds}
+          documentTitle={sourceName}
+          label={`Export all ${rounds.length} rounds from ${sourceName} as a printable packet`}
+        />
+      </div>
       <AnimatePresence initial={false}>
         {open && (
           <motion.div
@@ -110,18 +139,25 @@ function YearGroup({ yearName, rounds, onPreview, onEdit, onDelete, onToggleVisi
 
   return (
     <div className="rounded-md bg-muted/30">
-      <button
-        onClick={() => setOpen(!open)}
-        className="flex items-center gap-2 w-full px-3 py-2 hover:bg-accent/40 transition-colors text-left rounded-md"
-      >
-        {open
-          ? <ChevronDown className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
-          : <ChevronRight className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />}
-        <Calendar className="w-3.5 h-3.5 text-accent flex-shrink-0" />
-        <span className="font-medium text-sm truncate flex-1">{yearName}</span>
-        <Badge variant="outline" className="text-xs">{rounds.length}</Badge>
-        <span className="text-xs text-muted-foreground hidden sm:inline">{totalQuestions} Q</span>
-      </button>
+      <div className="flex items-center">
+        <button
+          onClick={() => setOpen(!open)}
+          className="flex items-center gap-2 flex-1 min-w-0 px-3 py-2 hover:bg-accent/40 transition-colors text-left rounded-md"
+        >
+          {open
+            ? <ChevronDown className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
+            : <ChevronRight className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />}
+          <Calendar className="w-3.5 h-3.5 text-accent flex-shrink-0" />
+          <span className="font-medium text-sm truncate flex-1">{yearName}</span>
+          <Badge variant="outline" className="text-xs">{rounds.length}</Badge>
+          <span className="text-xs text-muted-foreground hidden sm:inline">{totalQuestions} Q</span>
+        </button>
+        <ExportGroupButton
+          rounds={rounds}
+          documentTitle={yearName}
+          label={`Export all ${rounds.length} rounds from ${yearName} as a printable packet`}
+        />
+      </div>
       <AnimatePresence initial={false}>
         {open && (
           <motion.div

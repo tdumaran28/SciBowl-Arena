@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { base44 } from '@/api/base44Client';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Trophy, Medal, ChevronDown, ChevronUp, Zap, XCircle } from 'lucide-react';
+import { Trophy, Medal, ChevronDown, ChevronUp, Zap, XCircle, Sparkles, Swords } from 'lucide-react';
 import { format } from 'date-fns';
 
 const MEDAL_COLORS = ['text-amber-500', 'text-slate-400', 'text-orange-500'];
@@ -26,6 +26,16 @@ function EntryRow({ entry, rank }) {
             <p className="font-medium text-sm truncate">{entry.username}</p>
             {entry.mode === 'multiplayer' && (
               <Badge variant="outline" className="text-[10px] px-1 py-0">MP</Badge>
+            )}
+            {entry.powers && (
+              <Badge variant="outline" className="text-[10px] px-1 py-0 text-primary border-primary/40">
+                <Sparkles className="w-2.5 h-2.5 mr-0.5" />Powers
+              </Badge>
+            )}
+            {entry.boss_ups && (
+              <Badge variant="outline" className="text-[10px] px-1 py-0 text-primary border-primary/40">
+                <Swords className="w-2.5 h-2.5 mr-0.5" />Boss-ups
+              </Badge>
             )}
           </div>
           <p className="text-xs text-muted-foreground truncate">{entry.round_title}</p>
@@ -89,6 +99,8 @@ export default function LeaderboardSection() {
   const REQUIRED_SUBJECTS = ['Biology', 'Chemistry', 'Physics', 'Earth and Space', 'Math'];
   const isMarathon = (entry) => entry.mode === 'marathon';
   const isStandard = (entry) => {
+    // House rules: those scores aren't comparable to standard ones
+    if (entry.powers || entry.boss_ups) return false;
     // If subjects_filter is set the player deliberately filtered — always custom
     if (entry.subjects_filter?.length > 0) return false;
     // Check subject_points covers all required subjects
@@ -141,7 +153,7 @@ export default function LeaderboardSection() {
           <div>
             {tab === 'custom' && (
               <div className="px-5 pt-3 pb-1">
-                <p className="text-xs text-muted-foreground">Scores from games played with subject filters. Subjects shown per entry.</p>
+                <p className="text-xs text-muted-foreground">Scores from games with subject filters or house rules (powers). Details shown per entry.</p>
               </div>
             )}
             {entries.map((entry, i) => (

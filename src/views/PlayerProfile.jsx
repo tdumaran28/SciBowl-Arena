@@ -184,7 +184,11 @@ export default function PlayerProfile() {
         correct_interrupts: g.powers || 0,
         subject_points: subjectPoints,
         subjects_filter: (g.subjects_played && g.subjects_played.length) ? g.subjects_played : [],
-        is_custom: !!(g.subjects_played && g.subjects_played.length),
+        // Powers are a house rule, so those scores belong on the custom board
+        // alongside subject-filtered games.
+        powers: !!g.powers_enabled,
+        boss_ups: !!g.boss_ups,
+        is_custom: !!(g.subjects_played && g.subjects_played.length) || !!g.powers_enabled || !!g.boss_ups,
         mode: g.mode || 'solo',
         date: g.date || new Date().toISOString(),
       });

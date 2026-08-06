@@ -12,7 +12,10 @@ import QuestionReviewDialog from '@/components/game/QuestionReviewDialog';
 // can reread one mid-match. Only past questions are reachable: an event only
 // exists once the question has been answered, and the live one is filtered out
 // below so nobody can open the answer to the question being read.
-export default function MatchSidePanel({ session, myPlayerId, onLeave, getQuestion = null }) {
+// `getLabel(index)` resolves a logged event to its pair-numbered position
+// ("1.T", "1.B") — the same numbering the reader shows, so the log reads as the
+// packet is written rather than as a flat question count.
+export default function MatchSidePanel({ session, myPlayerId, onLeave, getQuestion = null, getLabel = null, powers = false }) {
   const players = session?.players || [];
   const teams = session?.teams || [];
   const hostId = session?.host_id;
@@ -80,9 +83,12 @@ export default function MatchSidePanel({ session, myPlayerId, onLeave, getQuesti
             // The question currently being read stays closed — opening it would
             // hand the reader its answer.
             const reviewable = getQuestion && ev.question_index != null && ev.question_index !== currentIndex;
+            const positionLabel = getLabel?.(ev.question_index);
             const body = (
               <>
-                <Badge variant="outline" className="text-[10px] px-1.5 flex-shrink-0">{ev.type}</Badge>
+                <Badge variant="outline" className="text-[10px] px-1.5 flex-shrink-0 tabular-nums">
+                  {positionLabel ?? ev.type}
+                </Badge>
                 <span className="flex-1 truncate text-left">
                   {ev.player} <span className="text-muted-foreground">· {ev.team || '—'}</span>
                 </span>
@@ -114,7 +120,9 @@ export default function MatchSidePanel({ session, myPlayerId, onLeave, getQuesti
           onOpenChange={(v) => !v && setReviewEvent(null)}
           question={reviewEvent ? getQuestion(reviewEvent.question_index) : null}
           questionNumber={reviewEvent ? reviewEvent.question_index + 1 : null}
+          questionLabel={reviewEvent ? getLabel?.(reviewEvent.question_index) : null}
           entry={reviewEvent ? { ...reviewEvent, result: reviewEvent.kind } : null}
+          powers={powers}
         />
       )}
     </div>
