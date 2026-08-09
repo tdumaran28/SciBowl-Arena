@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requireUser, errorResponse } from '@server/auth';
 import { getEntity } from '@server/db';
+import { requireSessionPlayer } from '@server/sessions';
 import { claimBuzz, ARBITRATION_WINDOW_MS } from '@server/buzz';
 
 // Buzz claim with latency-compensated arbitration.
@@ -12,13 +13,19 @@ import { claimBuzz, ARBITRATION_WINDOW_MS } from '@server/buzz';
 // one with the shortest network path. Losers get 409 with the winning state.
 export async function POST(request, { params }) {
   const { id } = await params;
-  const { error } = await requireUser();
+  const { user, error } = await requireUser();
   if (error) return error;
 
   try {
     const body = await request.json().catch(() => ({}));
     const session = getEntity('GameSession', id);
     if (!session) return NextResponse.json({ message: 'Session not found' }, { status: 404 });
+
+    // The buzzer is the authenticated player on this room's roster, not whoever
+    // the body names — otherwise a claim could be entered in someone else's
+    // name (and, with their team, out of a lockout that applied to them).
+    const { player, error: notInRoom } = requireSessionPlayer(session, user);
+    if (notInRoom) return NextResponse.json({ message: notInRoom }, { status: 403 });
 
     const bs = session.buzz_state || {};
     if (bs.buzzed_player_id && !bs.result) {
@@ -28,7 +35,9 @@ export async function POST(request, { params }) {
       return NextResponse.json({ message: 'Question already resolved', session }, { status: 409 });
     }
 
-    const { player_id, team, display_name, buzzed_at } = body || {};
+    const { buzzed_at } = body || {};
+    const player_id = player.user_id;
+    const team = player.team || '';
     const negged = bs.negged_teams || [];
     const neggedPlayers = bs.negged_players || [];
     if ((team && negged.includes(team)) || (!team && neggedPlayers.includes(player_id))) {
@@ -38,7 +47,7 @@ export async function POST(request, { params }) {
     const outcome = await claimBuzz(id, {
       playerId: player_id,
       team,
-      displayName: display_name,
+      displayName: player.display_name,
       buzzedAt: Number(buzzed_at),
     });
 

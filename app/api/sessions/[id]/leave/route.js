@@ -9,17 +9,21 @@ import { broadcastPatch } from '@server/realtime';
 //
 // sendBeacon cannot set an Authorization header, so unload beacons authenticate
 // with the Clerk session cookie that `auth()` reads anyway.
+//
+// You may only remove YOURSELF. The player id used to come from the body, which
+// made this an unauthenticated kick: any signed-in user who knew a room id
+// could drop anyone out of a live match — and dropping a room to one player
+// ends it.
 export async function POST(request, { params }) {
   const { id } = await params;
-  const { error } = await requireUser();
+  const { user, error } = await requireUser();
   if (error) return error;
 
   try {
-    const body = await request.json().catch(() => ({}));
-    const { player_id } = body || {};
     const session = getEntity('GameSession', id);
     if (!session) return NextResponse.json({ message: 'Session not found' }, { status: 404 });
 
+    const player_id = user.email;
     const players = (session.players || []).filter(p => p.user_id !== player_id);
     if (players.length === (session.players || []).length) {
       return NextResponse.json(session);

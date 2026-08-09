@@ -68,6 +68,16 @@ export default function QuestionReader({
   onAdvance,
   onBuzz,
   buzzEnabled = true,
+  // Multiplayer bonuses: the answer box is open from the start, with no buzz.
+  // A bonus belongs to the team that won the tossup and all of them get one, so
+  // there is nothing to arbitrate — they confer, and the first to submit is the
+  // team's answer. Buzzing for it would let the first teammate to hit the
+  // button lock the other three out of their own bonus.
+  openAnswer = false,
+  // The team the open bonus belongs to, when it belongs to one. Empty in a
+  // free-for-all room, where the bonus is the winning player's alone and there
+  // is no race with teammates to explain.
+  openAnswerTeam = null,
   multiplayer = false,
   resolved = false,
   onDead,
@@ -504,15 +514,19 @@ export default function QuestionReader({
     return () => window.removeEventListener('keydown', handler);
   }, [handleBuzzFn, handlePause, onPause, onQuit, onNext]); // stable refs; stateRef.current is always fresh
 
+  // Answering is open either because this player holds the buzz, or because the
+  // question is their team's bonus (no buzz involved).
+  const answering = buzzing || openAnswer;
+
   const handleMCChoice = (letter) => {
-    if (!buzzing || answerResultRef.current) return;
+    if (!answering || answerResultRef.current) return;
     setSelectedChoice(letter);
     doSubmitAnswer(letter);
   };
 
   const handleTypedSubmit = (e) => {
     e?.preventDefault();
-    if (!buzzing || !typedAnswer.trim() || answerResultRef.current) return;
+    if (!answering || !typedAnswer.trim() || answerResultRef.current) return;
     doSubmitAnswer(typedAnswer.trim());
   };
 
@@ -595,11 +609,15 @@ export default function QuestionReader({
         </p>
       </div>
 
-      {/* ── Buzz countdown bar ── */}
+      {/* ── Buzz countdown bar ──
+          On a bonus this window IS the answer window: the box is already open,
+          so it counts down to the answer, not to a buzz. */}
       {allWordsShown && !buzzing && !answerResult && !dead && isTimed && buzzTimeLeft !== null && (
         <div className="space-y-1">
           <div className="flex items-center justify-between text-xs text-muted-foreground">
-            <span className="flex items-center gap-1"><Clock className="w-3 h-3" /> Time to buzz</span>
+            <span className="flex items-center gap-1">
+              <Clock className="w-3 h-3" /> {openAnswer ? 'Time to answer' : 'Time to buzz'}
+            </span>
             <span className={cn("font-mono font-semibold", buzzTimeLeft <= 3 && "text-destructive")}>{buzzTimeLeft}s</span>
           </div>
           <Progress value={(buzzTimeLeft / buzzTime) * 100} className="h-1.5" />
@@ -622,12 +640,12 @@ export default function QuestionReader({
             return (
               <button
                 key={letter}
-                onClick={() => buzzing ? handleMCChoice(letter) : handleBuzzFn()}
+                onClick={() => answering ? handleMCChoice(letter) : handleBuzzFn()}
                 disabled={(!!answerResult && resultForCurrent && selectedChoice !== letter && !isCorrectLetter) || dead}
                 className={cn(
                   "flex items-center gap-3 p-3 rounded-lg border text-left text-sm transition-all duration-150",
                   !answerResult && !dead && "hover:bg-muted/60 cursor-pointer",
-                  buzzing && !answerResult && "hover:bg-primary/10 hover:border-primary/40",
+                  answering && !answerResult && "hover:bg-primary/10 hover:border-primary/40",
                   pickedThis && answerResult === 'correct' && "bg-emerald-500/15 border-emerald-500 text-emerald-700 dark:text-emerald-300",
                   pickedThis && (answerResult === 'wrong' || answerResult === 'interrupt_wrong') && "bg-destructive/10 border-destructive",
                   isCorrectLetter && selectedChoice !== letter && "bg-emerald-500/10 border-emerald-500/50",
@@ -645,18 +663,30 @@ export default function QuestionReader({
       )}
 
       {/* ── Typed answer input ── */}
-      {buzzing && !answerResult && (
+      {answering && !answerResult && (
         <form onSubmit={handleTypedSubmit} className="flex gap-2">
           <Input
             ref={inputRef}
             value={typedAnswer}
             onChange={e => setTypedAnswer(e.target.value)}
-            placeholder={isMC ? "Type W, X, Y, or Z — or click above…" : "Type your answer…"}
+            placeholder={isMC
+              ? 'Type W, X, Y, or Z — or click above…'
+              : openAnswer && openAnswerTeam
+                ? 'Type your answer, press Enter to submit for your team…'
+                : 'Type your answer…'}
             className="flex-1"
             autoFocus={!isMC}
           />
           <Button type="submit">Submit</Button>
         </form>
+      )}
+      {/* Every player on the team has one of these open, so say what pressing
+          Enter actually does — the first submission is the team's answer. */}
+      {openAnswer && !answerResult && openAnswerTeam && (
+        <p className="text-xs text-muted-foreground -mt-2">
+          <span className="font-medium text-foreground">{openAnswerTeam}</span>&apos;s bonus — confer.
+          The first answer anyone on the team submits is the one that counts.
+        </p>
       )}
 
       {/* ── Answer grace timer ── */}
@@ -670,8 +700,9 @@ export default function QuestionReader({
         </div>
       )}
 
-      {/* ── Buzz / action buttons ── */}
-      {!buzzing && !answerResult && !dead && (
+      {/* ── Buzz / action buttons ──
+          Not on a bonus this player may answer: there is no buzz to press. */}
+      {!answering && !answerResult && !dead && !resolved && (
         <div className="flex gap-2">
           <Button
             size="lg"
@@ -695,8 +726,8 @@ export default function QuestionReader({
         </div>
       )}
 
-      {/* ── Pause/quit during buzzing ── */}
-      {buzzing && !answerResult && (onPause || onQuit) && (
+      {/* ── Pause/quit while answering ── */}
+      {answering && !answerResult && (onPause || onQuit) && (
         <div className="flex gap-2 justify-end">
           {onPause && (
             <Button variant="outline" size="sm" onClick={handlePause} title={paused ? 'Resume (P)' : 'Pause (P)'}>

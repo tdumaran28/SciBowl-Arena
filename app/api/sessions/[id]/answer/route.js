@@ -1,29 +1,41 @@
 import { NextResponse } from 'next/server';
 import { requireUser, errorResponse } from '@server/auth';
+import { getEntity } from '@server/db';
 import { applyAnswer } from '@server/match';
+import { requireSessionPlayer } from '@server/sessions';
 import { broadcastPatch } from '@server/realtime';
 
 // Scoring is applied server-side so two players resolving at nearly the same
 // moment can't overwrite each other's score arrays (see server/match.js).
+//
+// WHO answered is taken from the authenticated session and the stored roster,
+// never from the request body: a body-supplied player_id let any signed-in user
+// score a question onto — or a neg against — somebody else's row.
 export async function POST(request, { params }) {
   const { id } = await params;
-  const { error } = await requireUser();
+  const { user, error } = await requireUser();
   if (error) return error;
 
   try {
     const body = await request.json().catch(() => ({}));
     const {
-      player_id, display_name, team, result, type, interrupted,
+      result, type, interrupted,
       submitted_answer, submitted_choice, question_format,
     } = body || {};
-    if (!player_id || !result) {
-      return NextResponse.json({ message: 'player_id and result are required' }, { status: 400 });
+    if (!result) {
+      return NextResponse.json({ message: 'result is required' }, { status: 400 });
     }
 
+    const session = getEntity('GameSession', id);
+    if (!session) return NextResponse.json({ message: 'Session not found' }, { status: 404 });
+
+    const { player, error: notInRoom } = requireSessionPlayer(session, user);
+    if (notInRoom) return NextResponse.json({ message: notInRoom }, { status: 403 });
+
     const outcome = applyAnswer(id, {
-      playerId: player_id,
-      displayName: display_name,
-      team,
+      playerId: player.user_id,
+      displayName: player.display_name,
+      team: player.team || '',
       result,
       type,
       interrupted,

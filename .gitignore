@@ -11,5 +11,10 @@ out/
 # Uploaded packet files (served from /uploads when Supabase Storage is unused)
 server/uploads/
 
+# Local JSON datastore. Runtime state, not source: it holds live game sessions
+# (with player emails), and it is read at startup — so a committed copy ships
+# your local rooms to production and puts real addresses in git history.
+server/data/
+
 .DS_Store
 *.log

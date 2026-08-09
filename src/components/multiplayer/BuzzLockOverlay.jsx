@@ -1,7 +1,7 @@
 import { Lock, Zap } from 'lucide-react';
 
 // Shown to players who are NOT the one buzzing / answering bonus
-export default function BuzzLockOverlay({ buzzState, myTeam }) {
+export default function BuzzLockOverlay({ buzzState, myTeam, myPlayerId = null }) {
   if (!buzzState) return null;
 
   // A pending buzz is a claim that has reached the server but not yet cleared
@@ -13,7 +13,12 @@ export default function BuzzLockOverlay({ buzzState, myTeam }) {
     ? { name: buzzState.buzzed_display_name }
     : pending ? { name: pending.display_name } : null;
 
-  const isBonusLock = buzzState.bonus_for_team && !buzzer;
+  // Free-for-all rooms have no teams, so a bonus is owned by a player and
+  // `bonus_for_team` is empty. Keying the lock on the team alone meant that in
+  // every no-teams game the players shut out of someone else's bonus got a
+  // dead buzzer and nothing on screen telling them why.
+  const bonusOwner = buzzState.bonus_for_team || buzzState.bonus_for_player || null;
+  const isBonusLock = !!bonusOwner && !buzzer;
   const isAnsweringLock = buzzer && !buzzState.result;
 
   if (isAnsweringLock) {
@@ -33,7 +38,9 @@ export default function BuzzLockOverlay({ buzzState, myTeam }) {
   }
 
   if (isBonusLock) {
-    const isMyTeamBonus = buzzState.bonus_for_team === myTeam;
+    const isMyTeamBonus = buzzState.bonus_for_team
+      ? buzzState.bonus_for_team === myTeam
+      : buzzState.bonus_for_player_id === myPlayerId;
     return (
       <div className={`rounded-xl border p-4 flex items-center gap-3 ${
         isMyTeamBonus
@@ -47,10 +54,13 @@ export default function BuzzLockOverlay({ buzzState, myTeam }) {
         </div>
         <div>
           <p className={`font-semibold ${isMyTeamBonus ? 'text-primary' : 'text-amber-700 dark:text-amber-300'}`}>
-            {isMyTeamBonus ? 'Your team\'s bonus!' : 'Bonus Locked'}
+            {isMyTeamBonus
+              ? (buzzState.bonus_for_team ? "Your team's bonus!" : 'Your bonus!')
+              : 'Bonus Locked'}
           </p>
           <p className="text-sm text-muted-foreground">
-            Bonus for team <span className="font-medium text-foreground">{buzzState.bonus_for_team}</span>
+            Bonus for {buzzState.bonus_for_team ? 'team ' : ''}
+            <span className="font-medium text-foreground">{bonusOwner}</span>
           </p>
         </div>
       </div>

@@ -57,18 +57,43 @@ export function applyAnswer(sessionId, {
   if (!session) return null;
 
   const bs = session.buzz_state || {};
+  const isBonus = type === 'BONUS';
 
   // Only the player holding the buzz may resolve it. Without this, any client
   // could post an answer for a question someone else buzzed on and score it
   // against them. Deliberately narrow: it rejects answering over an active
-  // buzzer, but stays out of the way when no buzz is recorded (bonuses that
-  // resolve on a timeout, host-forced advancement), so a match can't wedge.
+  // buzzer, but stays out of the way when no buzz is recorded (bonuses, which
+  // are never buzzed; host-forced advancement), so a match can't wedge.
   if (bs.buzzed_player_id && bs.buzzed_player_id !== playerId) {
     return { session, patch: null, rejected: 'another player holds the buzz' };
   }
+
+  // The question is already over. This is what makes a bonus first-answer-wins:
+  // every player on the owning team submits independently — nobody buzzes for
+  // a bonus — so without this guard two teammates hitting Enter together would
+  // each score it, and the second would overwrite the first team's answer in
+  // the log. Both branches of updateEntity run in one synchronous critical
+  // section, so the first write really is the first submission.
+  //
+  // A tossup is *not* over on a wrong answer — it reopens for the other teams —
+  // so only a correct one closes it.
+  if (bs.dead || (isBonus ? !!bs.result : bs.result === 'correct')) {
+    return { session, patch: null, rejected: 'this question is already resolved' };
+  }
+
+  // A bonus belongs to the team (free-for-all: the player) that won the tossup.
+  // Enforced here and not only in the UI, since the UI merely hides the box.
+  if (isBonus && (bs.bonus_for_team || bs.bonus_for_player_id)) {
+    const mine = bs.bonus_for_team
+      ? bs.bonus_for_team === team
+      : bs.bonus_for_player_id === playerId;
+    if (!mine) {
+      return { session, patch: null, rejected: 'this bonus belongs to another team' };
+    }
+  }
+
   const isCorrect = result === 'correct';
   const isNeg = result === 'interrupt_wrong';
-  const isBonus = type === 'BONUS';
   const powers = !!session.settings?.powers;
   const pts = pointsFor({ result, type, interrupted, powers });
 

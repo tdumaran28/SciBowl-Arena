@@ -168,16 +168,21 @@ export const base44 = {
   },
 
   multiplayer: {
+    // Who is acting is established from the authenticated session and the
+    // room's stored roster (server/sessions.js — requireSessionPlayer), so none
+    // of these calls carries a player id, display name or team. Only what the
+    // server cannot know travels in the body.
+    //
     // buzzed_at is this client's buzz instant on the SERVER's clock — the
     // server arbitrates on it so the earliest real buzz wins regardless of who
     // has the shorter network path (see server/buzz.js).
-    buzz: (sessionId, { player_id, team, display_name, buzzed_at }) =>
+    buzz: (sessionId, { buzzed_at }) =>
       request(`/api/sessions/${sessionId}/buzz`, {
-        method: 'POST', body: { player_id, team, display_name, buzzed_at },
+        method: 'POST', body: { buzzed_at },
       }),
-    sendChat: (sessionId, { sender_id, sender_name, text }) =>
+    sendChat: (sessionId, { text }) =>
       request(`/api/sessions/${sessionId}/chat`, {
-        method: 'POST', body: { sender_id, sender_name, text },
+        method: 'POST', body: { text },
       }),
     answer: (sessionId, body) =>
       request(`/api/sessions/${sessionId}/answer`, { method: 'POST', body }),
@@ -202,15 +207,19 @@ export const base44 = {
       request(`/api/sessions/${sessionId}/advance`, {
         method: 'POST', body: { action: 'lobby', round_id, game_type, reset_scores },
       }),
-    leave: (sessionId, { player_id }) =>
-      request(`/api/sessions/${sessionId}/leave`, { method: 'POST', body: { player_id } }),
+    // Removes the authenticated player — there is no kick.
+    leave: (sessionId) =>
+      request(`/api/sessions/${sessionId}/leave`, { method: 'POST', body: {} }),
     // The packets this room plays — including a host's private ones, which
     // aren't in other players' libraries.
     rounds: (sessionId) => request(`/api/sessions/${sessionId}/rounds`),
     // Unload-safe leave: a normal fetch is cancelled when the tab closes.
-    leaveBeacon: (sessionId, { player_id }) => {
+    // sendBeacon cannot set an Authorization header, so this authenticates with
+    // the Clerk session cookie instead — which is also the identity the route
+    // removes from the roster.
+    leaveBeacon: (sessionId) => {
       if (typeof navigator === 'undefined' || !navigator.sendBeacon) return false;
-      const blob = new Blob([JSON.stringify({ player_id })], { type: 'application/json' });
+      const blob = new Blob(['{}'], { type: 'application/json' });
       return navigator.sendBeacon(`/api/sessions/${sessionId}/leave`, blob);
     },
     joinRoom,

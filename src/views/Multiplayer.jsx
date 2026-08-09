@@ -44,6 +44,11 @@ function generateRoomCode() {
   return Math.random().toString(36).substring(2, 7).toUpperCase();
 }
 
+// How many bonus draws in a row a marathon will step over before giving up and
+// playing one. Only reached by a pool that is almost entirely bonuses; the bonus
+// it then lands on has no owner, so it reads as dead and anyone may advance.
+const MARATHON_BONUS_SCAN = 50;
+
 export default function Multiplayer() {
   const [user, setUser] = useState(null);
   const [displayName, setDisplayName] = useState('');
@@ -103,15 +108,23 @@ export default function Multiplayer() {
 
   const myPlayerId = user?.email || displayName;
 
+  const activeRound = useMemo(
+    () => rounds.find(r => r.id === session?.round_id),
+    [rounds, session?.round_id],
+  );
+
   // Every client derives this list independently and indexes into it by the
   // shared current_question_index, so it has to come out identical everywhere —
   // hence one shared rule set (subject filter, boss-ups, skipped bonuses).
-  const activeQuestions = applyQuestionRules(
-    rounds.find(r => r.id === session?.round_id)?.questions,
-    session?.settings || settings,
+  //
+  // Memoized because it is a packet-sized filter+map and `positions` below is
+  // keyed on its identity: rebuilding it on every render (a buzz, a chat
+  // message, a countdown tick) meant re-numbering the whole packet each time.
+  const activeQuestions = useMemo(
+    () => applyQuestionRules(activeRound?.questions, session?.settings || settings),
+    [activeRound, session?.settings, settings],
   );
 
-  const activeRound = rounds.find(r => r.id === session?.round_id);
   const players = session?.players || [];
   const teams = session?.teams || [];
   const myTeam = players.find(p => p.user_id === myPlayerId)?.team || '';
@@ -122,15 +135,23 @@ export default function Multiplayer() {
   // Marathon sessions carry no question list — every client derives the same
   // infinite sequence from the shared { seed, round_ids, subject_freq } config.
   const isMarathon = session?.game_type === 'marathon';
+  // Keyed on the sampling config alone, not on `session`: the pool is a pass
+  // over every question in every packet, and the whole session object changes
+  // identity on each buzz, chat message and poll — which rebuilt it (and every
+  // question lookup derived from it) many times a minute for no change at all.
+  const marathonRoundIds = session?.round_ids;
+  const marathonFilter = session?.round_filter;
+  const marathonSubjectFreq = session?.subject_freq;
+  const marathonTypes = session?.settings?.question_types;
   const marathonPools = useMemo(() => {
-    if (!isMarathon || !session) return null;
+    if (!isMarathon) return null;
     return buildMarathonPools(rounds, {
-      roundIds: session.round_ids || [],
-      roundFilter: session.round_filter || 'all',
-      questionTypes: session.settings?.question_types || ['TOSSUP', 'BONUS'],
-      subjectFreq: session.subject_freq || {},
+      roundIds: marathonRoundIds || [],
+      roundFilter: marathonFilter || 'all',
+      questionTypes: marathonTypes || ['TOSSUP', 'BONUS'],
+      subjectFreq: marathonSubjectFreq || {},
     });
-  }, [isMarathon, rounds, session]);
+  }, [isMarathon, rounds, marathonRoundIds, marathonFilter, marathonTypes, marathonSubjectFreq]);
 
   const bossUps = !!(session?.settings || settings)?.boss_ups;
 
@@ -165,9 +186,10 @@ export default function Multiplayer() {
   // the answer may be shown — all of it in src/utils/matchRules.js, which is
   // pure and is what server/match.test.js exercises directly.
   const {
-    isBonusForOther, bonusIsMine, someoneElseBuzzed, iAmBuzzing,
-    isTossupQ, isBonusQ, questionDead, resolved, wrongLimit,
-    canBuzz, canAdvance, revealAnswer,
+    isBonusForOther, someoneElseBuzzed, iAmBuzzing,
+    isBonusQ, questionDead, resolved, wrongLimit,
+    canBuzz, canAnswerBonus, canAdvance, revealAnswer,
+    bonusEarned, bonusOwnerPresent,
   } = deriveMatchState({ session, myPlayerId, question: currentQuestion });
 
   // Measure this machine's offset from the server clock before anything
@@ -188,7 +210,16 @@ export default function Multiplayer() {
       sessionRef.current = u;
       if (u.status === 'active' && view === 'room') setView('playing');
       if (u.status === 'finished' && view === 'playing') setView('finished');
-      if (u.status === 'waiting' && (view === 'playing' || view === 'finished')) setView('room');
+      if (u.status === 'waiting' && (view === 'playing' || view === 'finished')) {
+        // The host has taken the room back to selection to play another round.
+        // My own results belong to the round that just ended: carrying them
+        // into the next one left every non-host player's review showing the
+        // previous round's questions, indexed against the new round's list.
+        // (The host clears these in handlePlayAnotherRound; everyone else
+        // arrives here instead.)
+        setMyResults([]);
+        setView('room');
+      }
     };
 
     // Patch frames carry only the fields that changed — merge them onto the
@@ -200,10 +231,28 @@ export default function Multiplayer() {
     };
 
     const refetch = async () => {
+      let found;
       try {
         const arr = await base44.entities.GameSession.filter({ id: sessionId }, '-created_date', 1);
-        if (arr[0]) applyFull(arr[0]);
-      } catch { /* transient — the poll will retry */ }
+        found = arr[0];
+      } catch {
+        return; // transient (offline, restarting, expired token) — the poll retries
+      }
+      if (found) { applyFull(found); return; }
+
+      // A request that SUCCEEDED and found nothing is authoritative: this room
+      // is gone. Live sessions are held in the server's own process, so a
+      // restart, a redeploy, or an idle host spinning down takes every room with
+      // it — routine on a free tier. Ignoring the empty result left the player
+      // parked on a room that would never update again, with a buzzer that did
+      // nothing and no hint as to why.
+      if (cancelled || view === 'finished') return; // don't yank away a results screen
+      toast.error('This room is no longer available — the server may have restarted.');
+      sessionRef.current = null;
+      setSession(null);
+      setRoomCode('');
+      setMyResults([]);
+      setView('lobby');
     };
 
     refetch();
@@ -235,11 +284,11 @@ export default function Multiplayer() {
     const handler = () => {
       const sess = sessionRef.current;
       if (!sess) return;
-      base44.multiplayer.leaveBeacon(sess.id, { player_id: myPlayerId });
+      base44.multiplayer.leaveBeacon(sess.id);
     };
     window.addEventListener('pagehide', handler);
     return () => window.removeEventListener('pagehide', handler);
-  }, [session?.id, myPlayerId]);
+  }, [session?.id]);
 
   const updateSession = useCallback(async (data) => {
     if (!sessionRef.current?.id) return;
@@ -385,18 +434,24 @@ export default function Multiplayer() {
     setMyResults([]);
   };
 
-  // Buzz in. The buzz instant is stamped on the client (already converted to
-  // the server's clock) and the server awards the buzz to the earliest such
-  // instant within a short arbitration window — so the player who actually hit
-  // the buzzer first wins, not the one with the shortest network path.
+  // Buzz in — tossups only. The buzz instant is stamped on the client (already
+  // converted to the server's clock) and the server awards the buzz to the
+  // earliest such instant within a short arbitration window, so the player who
+  // actually hit the buzzer first wins, not the one with the shortest network
+  // path. A bonus never comes through here: it belongs to a whole team, and a
+  // claim would lock the rest of them out of it (see canAnswerBonus).
   const handleBuzz = useCallback(async (buzzedAt) => {
     const sess = sessionRef.current;
-    if (!sess || !canBuzz) return;
+    if (!sess) return;
+    // Re-derived from the room as it stands now rather than read from a value
+    // captured when this callback was built, which can be a frame behind the
+    // socket.
+    const st = deriveMatchState({
+      session: sess, myPlayerId, question: currentQuestionRef.current,
+    });
+    if (!st.canBuzz) return;
     try {
       const updated = await base44.multiplayer.buzz(sess.id, {
-        player_id: myPlayerId,
-        team: myTeam,
-        display_name: displayName,
         buzzed_at: buzzedAt ?? serverNow(),
       });
       setSession(updated);
@@ -418,7 +473,7 @@ export default function Multiplayer() {
         }
       }
     }
-  }, [canBuzz, myPlayerId, myTeam, displayName]);
+  }, [myPlayerId]);
 
   // Submit answer result (called from QuestionReader when I answered).
   // Scoring is applied server-side: two players resolving at nearly the same
@@ -426,12 +481,8 @@ export default function Multiplayer() {
   const handleAnswer = useCallback(async (result) => {
     const sess = sessionRef.current;
     if (!sess) return;
-    setMyResults(prev => [...prev, { ...result, questionIndex: currentIndex }]);
     try {
       const updated = await base44.multiplayer.answer(sess.id, {
-        player_id: myPlayerId,
-        display_name: displayName,
-        team: myTeam,
         result: result.result,
         type: result.type,
         interrupted: !!result.interrupted,
@@ -443,6 +494,12 @@ export default function Multiplayer() {
       });
       setSession(updated);
       sessionRef.current = updated;
+      // Recorded only once the server has taken it. On a team bonus everyone on
+      // the team submits and only the first is counted; recording optimistically
+      // put the losing teammates' answers in their own post-game review as if
+      // they had played, next to a score that never moved. `myResults` is only
+      // read on the results screen, so there is nothing to be optimistic for.
+      setMyResults(prev => [...prev, { ...result, questionIndex: currentIndex }]);
     } catch (err) {
       // A rejected answer (someone else holds the buzz, the question already
       // resolved) must not leave this client on stale state — take whatever the
@@ -451,9 +508,18 @@ export default function Multiplayer() {
         setSession(err.data.session);
         sessionRef.current = err.data.session;
       }
-      if (err.status !== 409) toast.error('Could not submit that answer — retrying from the room state');
+      // Say why it didn't count. On a bonus this is the ordinary outcome for
+      // three players out of four — they all had a box open and one of them was
+      // quicker — and silence there reads as the app having dropped the answer.
+      if (err.status === 409) {
+        toast(result.type === 'BONUS'
+          ? 'A teammate got their answer in first'
+          : 'That question had already been resolved', { duration: 2500 });
+      } else {
+        toast.error('Could not submit that answer — retrying from the room state');
+      }
     }
-  }, [currentIndex, myPlayerId, myTeam, displayName]);
+  }, [currentIndex]);
 
   // Tossup timer elapsed with no correct answer → question is dead (shared).
   // The server decides what "dead" means for the current roster.
@@ -499,18 +565,51 @@ export default function Multiplayer() {
     return () => clearTimeout(timer);
   }, [view, buzzState?.buzzed_player_id, buzzState?.buzzed_at, buzzState?.result, buzzState?.dead, myPlayerId]);
 
-  // Advance to next question (only the person who answered correctly / captain
-  // for bonus can press next — plus the fallbacks that keep a room unstuck).
+  // Watchdog: a bonus whose whole team has left the room.
+  //
+  // Only the owning team's clients run a bonus's answer clock — everyone else is
+  // locked out of it and their timer is stopped — so once the last of them goes,
+  // nothing is left to report the timeout. Every remaining client already reads
+  // the question as dead (bonusUnanswerable in matchRules.js) and so can advance
+  // it, but the server should agree rather than leave it open forever. Guarded
+  // and idempotent server-side, so all of them reporting is harmless.
+  useEffect(() => {
+    if (view !== 'playing') return;
+    if (!isBonusQ || !bonusEarned || bonusOwnerPresent) return;
+    if (buzzState?.dead || buzzState?.result) return;
+    // Briefly delayed so a roster frame that arrives a beat before the rest of
+    // the session doesn't kill a bonus its team is still holding.
+    const timer = setTimeout(handleDead, 500);
+    return () => clearTimeout(timer);
+  }, [view, isBonusQ, bonusEarned, bonusOwnerPresent, buzzState?.dead, buzzState?.result, handleDead]);
+
+  // Advance to next question. Who may press it is `canAdvance` (matchRules.js);
+  // this decides WHERE to go — which is where the bonus rule lives, because a
+  // bonus is only played by the team that won the tossup before it.
   const handleNext = useCallback(async () => {
     const sess = sessionRef.current;
     if (!sess) return;
 
-    // Marathon: endless — every sampled question stands alone (no bonus
-    // skipping/ownership). The game only ends when the host ends it.
+    const bs = sess.buzz_state || {};
+    // Did the question just played earn a bonus? Only a correct tossup does.
+    const wasEarned = !!(bs.bonus_for_team || bs.bonus_for_player_id || bs.bonus_for_player);
+
+    // Marathon: endless, and each index is drawn from (seed, k) rather than read
+    // off a stored list — but a drawn BONUS is still a bonus. It belongs to the
+    // team that won the draw before it, and if nobody won that draw there is no
+    // one to read it to, so it is stepped over exactly as in round practice.
     if (sess.game_type === 'marathon') {
+      let nextIdx = (sess.current_question_index || 0) + 1;
+      let scanned = 0;
+      while (!wasEarned && getQuestionAt(nextIdx)?.type === 'BONUS' && scanned++ < MARATHON_BONUS_SCAN) {
+        nextIdx++;
+      }
       try {
         const updated = await base44.multiplayer.next(sess.id, {
-          next_index: (sess.current_question_index || 0) + 1,
+          next_index: nextIdx,
+          // Carried only onto a bonus, and only one that was earned — the loop
+          // above has already stepped past any that were not.
+          keep_bonus_owner: getQuestionAt(nextIdx)?.type === 'BONUS',
         });
         setSession(updated);
         sessionRef.current = updated;
@@ -524,7 +623,6 @@ export default function Multiplayer() {
 
     let nextIdx = (sess.current_question_index || 0) + 1;
     // Skip ALL consecutive unearned bonuses (covers bonus-after-bonus chains)
-    const wasEarned = sess.buzz_state?.bonus_for_team || sess.buzz_state?.bonus_for_player_id || sess.buzz_state?.bonus_for_player;
     while (nextIdx < qs.length && qs[nextIdx]?.type === 'BONUS' && !wasEarned) {
       nextIdx++;
     }
@@ -549,12 +647,12 @@ export default function Multiplayer() {
     } catch {
       toast.error('Could not advance — try again');
     }
-  }, [rounds]);
+  }, [rounds, getQuestionAt]);
 
   const handleLeave = async () => {
     // Remove myself from players; if only one (or fewer) remains, they win by default.
     if (session?.id) {
-      await base44.multiplayer.leave(session.id, { player_id: myPlayerId }).catch(() => {});
+      await base44.multiplayer.leave(session.id).catch(() => {});
     }
     clearInterval(pollRef.current);
     setView('lobby');
@@ -570,9 +668,7 @@ export default function Multiplayer() {
   const handleSendMessage = async (text) => {
     const sess = sessionRef.current;
     if (!sess) return;
-    const updated = await base44.multiplayer.sendChat(sess.id, {
-      sender_id: myPlayerId, sender_name: displayName, text,
-    });
+    const updated = await base44.multiplayer.sendChat(sess.id, { text });
     setSession(updated);
     sessionRef.current = updated;
   };
@@ -654,6 +750,10 @@ export default function Multiplayer() {
               </CardTitle>
             </CardHeader>
             <CardContent>
+              {/* Leaving is leaving — it drops you from the roster and hands
+                  the room to whoever is left (server/.../leave). It is not a
+                  "close the room for everyone", and labelling it as one told
+                  the host their players had been sent home when they hadn't. */}
               {isHost ? (
                 <div className="flex flex-col sm:flex-row gap-2">
                   <Button className="flex-1" onClick={() => handlePlayAnotherRound('')}>
@@ -661,18 +761,20 @@ export default function Multiplayer() {
                     {isMarathon ? 'New Marathon' : 'Play Another Round'}
                   </Button>
                   <Button variant="outline" className="flex-1" onClick={handleLeave}>
-                    <LogOut className="w-4 h-4 mr-2" /> End Game & Close Room
+                    <LogOut className="w-4 h-4 mr-2" /> Leave Room
                   </Button>
                 </div>
               ) : (
-                <p className="text-sm text-muted-foreground">
-                  The host can start another round with the same players, or close the room.
-                  You&apos;ll be pulled back into the room automatically if they play on.
-                </p>
+                <>
+                  <p className="text-sm text-muted-foreground">
+                    The host can start another round with the same players.
+                    You&apos;ll be pulled back into the room automatically if they play on.
+                  </p>
+                  <Button variant="ghost" size="sm" className="mt-3 text-muted-foreground" onClick={handleLeave}>
+                    Leave this room
+                  </Button>
+                </>
               )}
-              <Button variant="ghost" size="sm" className="mt-3 text-muted-foreground" onClick={handleLeave}>
-                Leave this room
-              </Button>
             </CardContent>
           </Card>
         </div>
@@ -693,13 +795,14 @@ export default function Multiplayer() {
 
   // ── Playing ───────────────────────────────────────────────────────────────
   if (view === 'playing') {
-    // The team (or, in free-for-all, the player) that won the tossup answers the bonus.
-    const canAnswerMyBonus = isBonusQ && bonusIsMine && !resolved;
     // Frozen out (cannot buzz, reading pauses) when someone else is answering a
-    // tossup or the bonus belongs to someone else.
+    // tossup or the bonus belongs to another team.
     const externalBuzzed = someoneElseBuzzed || (isBonusQ && isBonusForOther && !resolved);
-    const buzzEnabled = (canBuzz || canAnswerMyBonus) && !iAmBuzzing;
-    const canInteract = iAmBuzzing || canAnswerMyBonus;
+    // Buzzing is for tossups only. A bonus belongs to a whole team, so instead of
+    // a buzz every one of them gets an open answer box (`canAnswerBonus`) and
+    // the first submission is the team's answer — see src/utils/matchRules.js.
+    const buzzEnabled = canBuzz && !iAmBuzzing;
+    const canInteract = iAmBuzzing || canAnswerBonus;
     const showLock = externalBuzzed;
 
     // Advancing a question that is still live is a skip (the host's escape
@@ -760,6 +863,8 @@ export default function Multiplayer() {
                   settings={session?.settings || settings}
                   onAnswer={canInteract ? handleAnswer : () => {}}
                   onBuzz={buzzEnabled ? handleBuzz : undefined}
+                  openAnswer={canAnswerBonus}
+                  openAnswerTeam={buzzState?.bonus_for_team || null}
                   onDead={handleDead}
                   isBonusFor={isBonusQ ? (buzzState?.bonus_for_team || buzzState?.bonus_for_player || null) : null}
                   externalBuzzed={externalBuzzed}
@@ -779,7 +884,9 @@ export default function Multiplayer() {
                   revealAnswer={revealAnswer}
                   wrongLimit={wrongLimit}
                 />
-                {showLock && <BuzzLockOverlay buzzState={buzzState} myTeam={myTeam} />}
+                {showLock && (
+                  <BuzzLockOverlay buzzState={buzzState} myTeam={myTeam} myPlayerId={myPlayerId} />
+                )}
                 {canAdvance && (
                   <Button
                     onClick={handleNext}

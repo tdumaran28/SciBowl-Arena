@@ -93,6 +93,9 @@ function clientView(session, { myPlayerId, questionFormat = 'Short Answer', isBo
     dead: state.questionDead,
     resolved: state.resolved,
     canBuzz: state.canBuzz,
+    // Bonuses are not buzzed — the owning team all get an open answer box, so
+    // this is the "may I put an answer in" of a bonus.
+    canAnswerBonus: state.canAnswerBonus,
     canAdvance: state.canAdvance,
     revealsAnswer: state.revealAnswer,
     lockedByOther: state.someoneElseBuzzed,
@@ -213,6 +216,218 @@ test('a player cannot answer over someone else’s buzz', () => {
   assert.equal(outcome.session.players.find(p => p.user_id === 'b').score, 0);
 });
 
+// ── Team play ───────────────────────────────────────────────────────────────
+//
+// `captain_id` is assigned once, to whoever typed the team name, and is never
+// reassigned — so anything that gates play on it gates play on one specific
+// person being present and awake. It is a display marker only.
+
+test('every player on a team may buzz, not just the captain', () => {
+  const teams = [{ name: 'Red', captain_id: 'a' }, { name: 'Blue', captain_id: 'c' }];
+  const s = makeSession({ teams, playerIds: ['a', 'b', 'c', 'd'] });
+  const live = getEntity('GameSession', s.id);
+  live.players = live.players.map(p => ({ ...p, team: ['a', 'b'].includes(p.user_id) ? 'Red' : 'Blue' }));
+
+  for (const id of ['a', 'b', 'c', 'd']) {
+    assert.equal(clientView(live, { myPlayerId: id }).canBuzz, true,
+      `${id} must be able to buzz a live tossup`);
+  }
+});
+
+test('a team whose captain has left can still buzz', () => {
+  const teams = [{ name: 'Red', captain_id: 'a' }, { name: 'Blue', captain_id: 'c' }];
+  const s = makeSession({ teams, playerIds: ['a', 'b', 'c', 'd'] });
+  const live = getEntity('GameSession', s.id);
+  live.players = live.players.map(p => ({ ...p, team: ['a', 'b'].includes(p.user_id) ? 'Red' : 'Blue' }));
+  // The captain closes their laptop; the leave route drops them from the roster
+  // but leaves `teams` (and its stale captain_id) alone.
+  live.players = live.players.filter(p => p.user_id !== 'a');
+
+  assert.equal(clientView(live, { myPlayerId: 'b' }).canBuzz, true,
+    'Red must not be locked out of the rest of the match by its captain leaving');
+});
+
+test('a team lockout still applies to the whole team', () => {
+  const teams = [{ name: 'Red', captain_id: 'a' }, { name: 'Blue', captain_id: 'c' }];
+  const s = makeSession({ teams, playerIds: ['a', 'b', 'c', 'd'] });
+  const live = getEntity('GameSession', s.id);
+  live.players = live.players.map(p => ({ ...p, team: ['a', 'b'].includes(p.user_id) ? 'Red' : 'Blue' }));
+
+  const cur = answer(s.id, 'b', 'wrong', { team: 'Red' });
+  assert.equal(clientView(cur, { myPlayerId: 'a' }).canBuzz, false, 'A is negged with their team');
+  assert.equal(clientView(cur, { myPlayerId: 'b' }).canBuzz, false);
+  assert.equal(clientView(cur, { myPlayerId: 'd' }).canBuzz, true, 'Blue is still open');
+});
+
+// ── Bonuses ─────────────────────────────────────────────────────────────────
+//
+// A bonus belongs to the TEAM that won the tossup. All of them get an open
+// answer box for the whole window — no buzz, because arbitrating one would let
+// the first teammate to press the button lock the other three out of their own
+// bonus — and the first submission to reach the server is the team's answer.
+
+/** A room of two teams: Red = a, b (a won it) / Blue = c, d — on the bonus. */
+function bonusForRed() {
+  const teams = [{ name: 'Red', captain_id: 'a' }, { name: 'Blue', captain_id: 'c' }];
+  const s = makeSession({ teams, playerIds: ['a', 'b', 'c', 'd'] });
+  const live = getEntity('GameSession', s.id);
+  live.players = live.players.map(p => ({ ...p, team: ['a', 'b'].includes(p.user_id) ? 'Red' : 'Blue' }));
+  answer(s.id, 'a', 'correct', { team: 'Red' });
+  applyAdvance(s.id, { nextIndex: 1, keepBonusOwner: true });
+  return s.id;
+}
+
+const answerBonus = (id, player, result, team) =>
+  applyAnswer(id, {
+    playerId: player, displayName: player.toUpperCase(), team,
+    result, type: 'BONUS', questionFormat: 'Short Answer',
+  });
+
+test('a team bonus is answerable by every member of that team and nobody else', () => {
+  const id = bonusForRed();
+  const cur = getEntity('GameSession', id);
+
+  for (const p of ['a', 'b']) {
+    const v = clientView(cur, { myPlayerId: p, isBonus: true });
+    assert.equal(v.canAnswerBonus, true, `${p} is on the team that earned it`);
+    assert.equal(v.canBuzz, false, 'a bonus is not buzzed');
+  }
+  for (const p of ['c', 'd']) {
+    assert.equal(clientView(cur, { myPlayerId: p, isBonus: true }).canAnswerBonus, false,
+      `${p} is on the other team`);
+  }
+});
+
+test('the first bonus answer from the team is the one that counts', () => {
+  const id = bonusForRed();
+
+  // B answers correctly first; A is a beat behind with a wrong one.
+  const first = answerBonus(id, 'b', 'correct', 'Red');
+  assert.equal(first.rejected, undefined);
+  assert.equal(first.session.buzz_state.result, 'correct');
+
+  const second = answerBonus(id, 'a', 'wrong', 'Red');
+  assert.equal(second.rejected, 'this question is already resolved');
+  assert.equal(second.patch, null);
+
+  const cur = getEntity('GameSession', id);
+  assert.equal(cur.teams.find(t => t.name === 'Red').score, SCORING.TOSSUP_CORRECT + SCORING.BONUS_CORRECT,
+    'the bonus is scored once, not once per teammate');
+  assert.equal(cur.question_results.filter(r => r.type === 'BONUS').length, 1,
+    'and appears once in the points log');
+  assert.equal(cur.question_results.at(-1).player, 'B', 'logged against whoever got it in first');
+});
+
+test('a losing race does not turn a correct bonus into a wrong one', () => {
+  const id = bonusForRed();
+  answerBonus(id, 'b', 'wrong', 'Red');            // B is first, and wrong
+  const late = answerBonus(id, 'a', 'correct', 'Red');
+  assert.equal(late.rejected, 'this question is already resolved');
+  assert.equal(getEntity('GameSession', id).buzz_state.result, 'wrong');
+  assert.equal(getEntity('GameSession', id).teams.find(t => t.name === 'Red').score,
+    SCORING.TOSSUP_CORRECT, 'no bonus points');
+});
+
+test('the other team cannot answer a bonus even by asking the server directly', () => {
+  const id = bonusForRed();
+  const outcome = answerBonus(id, 'c', 'correct', 'Blue');
+  assert.equal(outcome.rejected, 'this bonus belongs to another team');
+  assert.equal(getEntity('GameSession', id).teams.find(t => t.name === 'Blue').score, 0);
+});
+
+test('a bonus survives the player who won it leaving, as long as a teammate is here', () => {
+  const id = bonusForRed();
+  const cur = getEntity('GameSession', id);
+  cur.players = cur.players.filter(p => p.user_id !== 'a');   // A (who won it) leaves
+
+  const v = clientView(cur, { myPlayerId: 'b', isBonus: true });
+  assert.equal(v.dead, false, 'Red still has B');
+  assert.equal(v.canAnswerBonus, true, 'and the bonus is still theirs to answer');
+  assert.equal(clientView(cur, { myPlayerId: 'c', isBonus: true }).canAnswerBonus, false);
+});
+
+test('a bonus whose whole team has left is dead and advanceable by anyone', () => {
+  const id = bonusForRed();
+  const cur = getEntity('GameSession', id);
+  cur.host_id = 'c';
+  cur.players = cur.players.filter(p => !['a', 'b'].includes(p.user_id));  // all of Red leaves
+
+  for (const p of ['c', 'd']) {
+    const v = clientView(cur, { myPlayerId: p, isBonus: true });
+    assert.equal(v.dead, true, `${p} sees a bonus nobody can answer as dead`);
+    assert.equal(v.canAnswerBonus, false, 'and cannot answer it themselves');
+    assert.equal(v.canAdvance, true, `${p} may move the room on`);
+    assert.equal(v.revealsAnswer, true, 'the question is over, so the answer is shown');
+  }
+});
+
+test('a bonus nobody answered in time is dead and advanceable by anyone', () => {
+  const id = bonusForRed();
+  const cur = applyDead(id, { isBonus: true }).session;
+  assert.equal(cur.buzz_state.dead, true);
+  for (const p of ['a', 'b', 'c', 'd']) {
+    const v = clientView(cur, { myPlayerId: p, isBonus: true });
+    assert.equal(v.canAdvance, true, `${p} may press next`);
+    assert.equal(v.canAnswerBonus, false, 'the window has closed');
+  }
+});
+
+test('an unowned bonus is never left for the room to stare at', () => {
+  // Nobody won the tossup, so no team owns the bonus. The advance path steps
+  // over it; if one is ever reached anyway it must not be a question that every
+  // player is locked out of.
+  const teams = [{ name: 'Red', captain_id: 'a' }, { name: 'Blue', captain_id: 'c' }];
+  const s = makeSession({ teams, playerIds: ['a', 'b', 'c', 'd'] });
+  const next = applyAdvance(s.id, { nextIndex: 1, keepBonusOwner: true }).session;
+  for (const p of ['a', 'b', 'c', 'd']) {
+    const v = clientView(next, { myPlayerId: p, isBonus: true });
+    assert.equal(v.canAnswerBonus, false);
+    assert.equal(v.dead, true);
+    assert.equal(v.canAdvance, true);
+  }
+});
+
+test('a player with no team owns the bonus they won, in a room that has teams', () => {
+  // TeamPanel lists unassigned players under "No Team", so this is an ordinary
+  // room state, not a corrupt one. The tossup is won for nobody's team, so the
+  // bonus is the player's — reading it as a team bonus with no team locked the
+  // winner out of their own bonus and let no one else have it either.
+  const teams = [{ name: 'Red', captain_id: 'a' }];
+  const s = makeSession({ teams, playerIds: ['a', 'b', 'loner'] });
+  const live = getEntity('GameSession', s.id);
+  live.players = live.players.map(p => ({ ...p, team: ['a', 'b'].includes(p.user_id) ? 'Red' : '' }));
+
+  const won = answer(s.id, 'loner', 'correct', { team: '' });
+  assert.equal(clientView(won, { myPlayerId: 'loner' }).canAdvance, true,
+    'they may advance the tossup they just won');
+
+  const next = applyAdvance(s.id, { nextIndex: 1, keepBonusOwner: true }).session;
+  assert.equal(clientView(next, { myPlayerId: 'loner', isBonus: true }).canAnswerBonus, true);
+  for (const p of ['a', 'b']) {
+    assert.equal(clientView(next, { myPlayerId: p, isBonus: true }).canAnswerBonus, false,
+      `${p} did not win it`);
+  }
+  assert.equal(
+    applyAnswer(s.id, { playerId: 'a', displayName: 'A', team: 'Red', result: 'correct', type: 'BONUS' }).rejected,
+    'this bonus belongs to another team',
+  );
+});
+
+test('a free-for-all bonus belongs to the one player who won the tossup', () => {
+  const s = makeSession({ playerIds: ['a', 'b', 'c'] });
+  answer(s.id, 'a', 'correct');
+  const next = applyAdvance(s.id, { nextIndex: 1, keepBonusOwner: true }).session;
+
+  assert.equal(clientView(next, { myPlayerId: 'a', isBonus: true }).canAnswerBonus, true);
+  for (const p of ['b', 'c']) {
+    assert.equal(clientView(next, { myPlayerId: p, isBonus: true }).canAnswerBonus, false);
+  }
+  const outcome = applyAnswer(s.id, {
+    playerId: 'b', displayName: 'B', team: '', result: 'correct', type: 'BONUS',
+  });
+  assert.equal(outcome.rejected, 'this bonus belongs to another team');
+});
+
 // ── Softlocks ───────────────────────────────────────────────────────────────
 
 test('a buzz nobody answers is released, and the room reopens', () => {
@@ -313,8 +528,8 @@ test('a bonus carried onto the next question keeps its owner and nobody else', (
   answer(s.id, 'a', 'correct');
   const next = applyAdvance(s.id, { nextIndex: 1, keepBonusOwner: true }).session;
   assert.equal(next.buzz_state.bonus_for_player_id, 'a');
-  assert.equal(clientView(next, { myPlayerId: 'b', isBonus: true }).canBuzz, false);
-  assert.equal(clientView(next, { myPlayerId: 'a', isBonus: true }).canBuzz, true);
+  assert.equal(clientView(next, { myPlayerId: 'b', isBonus: true }).canAnswerBonus, false);
+  assert.equal(clientView(next, { myPlayerId: 'a', isBonus: true }).canAnswerBonus, true);
 });
 
 test('a provisional lock never outlives its question', () => {
@@ -382,6 +597,30 @@ test('no reachable state leaves every player unable to act', () => {
           views.some(({ v }) => v.canBuzz || v.canAdvance),
           `run ${run} step ${step}: nobody could buzz or advance\n${JSON.stringify(cur.buzz_state)}`,
         );
+
+        // A team's right to buzz belongs to the team, not to one nominated
+        // player: if the question is open to a team at all, whoever of them is
+        // still in the room can take it. The weaker invariant above cannot see
+        // this — the host can always advance, which hides a room where a whole
+        // team has gone quiet.
+        if (useTeams) {
+          const bs = cur.buzz_state || {};
+          const open = !bs.dead && bs.result !== 'correct' && !bs.buzzed_player_id
+            && !bs.pending_buzz && !bs.bonus_for_team;
+          if (open) {
+            for (const team of ['Red', 'Blue']) {
+              const present = views.filter(({ id }) =>
+                cur.players.find(p => p.user_id === id)?.team === team);
+              if (present.length === 0) continue;
+              if ((bs.negged_teams || []).includes(team)) continue;
+              assert.ok(
+                present.some(({ v }) => v.canBuzz),
+                `run ${run} step ${step}: ${team} is open but no present member could buzz` +
+                `\n${JSON.stringify(bs)}`,
+              );
+            }
+          }
+        }
       }
 
       const action = pick(['answer', 'answer', 'answer', 'dead', 'stale', 'leave']);
@@ -404,6 +643,73 @@ test('no reachable state leaves every player unable to act', () => {
         const live = getEntity('GameSession', s.id);
         live.players = live.players.filter(p => p.user_id !== gone);
         if (live.host_id === gone) live.host_id = live.players[0].user_id; // the leave route hands over
+      }
+    }
+  }
+});
+
+// The bonus twin of the softlock walk above. A bonus is the narrowest state in
+// the match — exactly one team may act on it — so it is where "nobody can do
+// anything" is easiest to reach. Rather than trust that the three ways a room
+// can be arranged (teams, free-for-all, teams with unassigned players) all
+// resolve ownership the same way, enumerate them against every way the owner
+// can go missing.
+test('no bonus state leaves the room with nothing to do', () => {
+  const arrangements = [
+    { name: 'teams', teams: [{ name: 'Red', captain_id: 'a' }, { name: 'Blue', captain_id: 'c' }],
+      teamOf: { a: 'Red', b: 'Red', c: 'Blue', d: 'Blue' } },
+    { name: 'free-for-all', teams: [], teamOf: {} },
+    { name: 'teams with an unassigned player', teams: [{ name: 'Red', captain_id: 'a' }],
+      teamOf: { a: 'Red', b: 'Red' } },
+  ];
+
+  for (const arrangement of arrangements) {
+    for (const winner of ['a', 'd']) {
+      for (const leaving of [[], [winner], ['a', 'b'], ['a', 'b', 'c', 'd'].filter(id => id !== 'c')]) {
+        for (const outcome of [null, 'wrong', 'correct']) {
+          const s = makeSession({ teams: arrangement.teams, playerIds: ['a', 'b', 'c', 'd'] });
+          const live = getEntity('GameSession', s.id);
+          live.players = live.players.map(p => ({ ...p, team: arrangement.teamOf[p.user_id] || '' }));
+          live.host_id = 'a';
+
+          const winnerTeam = arrangement.teamOf[winner] || '';
+          answer(s.id, winner, 'correct', { team: winnerTeam });
+          applyAdvance(s.id, { nextIndex: 1, keepBonusOwner: true });
+          if (outcome) answer(s.id, winner, outcome, { team: winnerTeam, type: 'BONUS' });
+
+          const cur = getEntity('GameSession', s.id);
+          cur.players = cur.players.filter(p => !leaving.includes(p.user_id));
+          // The leave route always hands the room over to someone still here.
+          if (leaving.includes(cur.host_id) && cur.players.length > 0) cur.host_id = cur.players[0].user_id;
+
+          const roster = cur.players.map(p => p.user_id);
+          if (roster.length === 0) continue;
+          const views = roster.map(id => ({ id, v: clientView(cur, { myPlayerId: id, isBonus: true }) }));
+
+          const where = `${arrangement.name}, won by ${winner}, ${outcome || 'unanswered'}, ` +
+            `after ${leaving.length ? leaving.join('+') + ' left' : 'nobody left'}`;
+          assert.ok(
+            views.some(({ v }) => v.canAnswerBonus || v.canAdvance),
+            `${where}: nobody could answer or advance\n${JSON.stringify(cur.buzz_state)}`,
+          );
+          // A bonus its own team answered is theirs to advance, like the tossup
+          // before it. But a DEAD one — the window gone, or the team gone — is
+          // over for the whole room, so every player must be able to move it on
+          // without waiting on anybody.
+          for (const { id, v } of views) {
+            if (!v.dead) continue;
+            assert.equal(v.canAdvance, true, `${where}: ${id} could not advance a dead bonus`);
+            assert.equal(v.canAnswerBonus, false, `${where}: ${id} could still answer a dead bonus`);
+            assert.equal(v.revealsAnswer, true, `${where}: the answer stayed hidden after the bonus died`);
+          }
+          // Nobody left who may answer it ⇒ it is dead. This is the rule that
+          // keeps a room from staring at a question none of them may touch.
+          if (views.every(({ v }) => !v.canAnswerBonus) && !cur.buzz_state.result) {
+            for (const { id, v } of views) {
+              assert.equal(v.dead, true, `${where}: ${id} sees an unanswerable bonus as still live`);
+            }
+          }
+        }
       }
     }
   }

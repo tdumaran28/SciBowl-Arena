@@ -127,3 +127,34 @@ export async function authorizeSessionUpdate(input, user, existing) {
 export function canReadSessionRounds(session, user) {
   return isHost(session, user) || isMember(session, user);
 }
+
+/**
+ * The roster entry acting on this request.
+ *
+ * Sessions are reachable by id to any signed-in user (that is how joining by
+ * room code works), so every match route has to establish *who is acting* from
+ * the session rather than from the request body. A body-supplied `player_id`
+ * let any signed-in user post an answer as somebody else — scoring points onto
+ * their row, or a neg against it — buzz in their name, chat as them, or drop
+ * them from a room they were playing in. None of that is reachable through the
+ * UI; all of it was reachable with a `fetch`.
+ *
+ * Identity is the email, the same key `players[].user_id` and `host_id` carry
+ * everywhere else, so a legitimate client sees no change. The display name and
+ * team come from the stored roster too: those are what every other player's
+ * screen shows, so reading them from the request was the one copy that could
+ * disagree.
+ *
+ * Returns { player } for a member, or { error } to return as-is.
+ */
+export function requireSessionPlayer(session, user) {
+  const id = user?.email;
+  const player = (session?.players || []).find(p => p.user_id === id);
+  if (player) return { player };
+  // The host is authoritative over the room even in the window before (or
+  // after) they appear on the roster — e.g. ending a game they have left.
+  if (isHost(session, user)) {
+    return { player: { user_id: id, display_name: user?.full_name || 'Host', team: '' } };
+  }
+  return { error: 'You are not in this room' };
+}

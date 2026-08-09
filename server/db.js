@@ -31,23 +31,46 @@ function load() {
 
 export const db = load();
 
+// Persistence is write-behind, so it runs in a timer with no caller to reject
+// to: an unguarded throw here is an uncaught exception that takes the whole
+// process down ~300 ms after a request that already returned 200. A read-only
+// or full filesystem is exactly the case where that happens — including any
+// serverless host, where the deployment bundle is read-only, so a single game
+// action would crash the instance. Degrade to in-memory instead and say so
+// once; the request itself has already been served from `db`.
+let warnedUnwritable = false;
+function persist() {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const tmp = DB_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(db));
+    fs.renameSync(tmp, DB_FILE);
+  } catch (err) {
+    if (!warnedUnwritable) {
+      warnedUnwritable = true;
+      console.error(
+        `[db] cannot write ${DB_FILE} (${err.code || err.message}) — the local JSON store ` +
+        'is running in memory only, so nothing here survives a restart and nothing is ' +
+        'shared between instances. Configure Supabase, or run on a host with a writable ' +
+        'working directory.',
+      );
+    }
+  }
+}
+
 let saveTimer = null;
 export function save() {
   if (saveTimer) return;
   saveTimer = setTimeout(() => {
     saveTimer = null;
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    const tmp = DB_FILE + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(db));
-    fs.renameSync(tmp, DB_FILE);
+    persist();
   }, 300);
 }
 
 process.on('exit', () => {
   if (saveTimer) {
     clearTimeout(saveTimer);
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(DB_FILE, JSON.stringify(db));
+    persist();
   }
 });
 

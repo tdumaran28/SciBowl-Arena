@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { requireUser, errorResponse } from '@server/auth';
+import { getEntity } from '@server/db';
 import { applyAdvance, applyStart, applyDead, applyReturnToLobby, applyStaleBuzzRelease } from '@server/match';
+import { requireSessionPlayer } from '@server/sessions';
 import { cancelWindow } from '@server/buzz';
 import { broadcastPatch } from '@server/realtime';
 
@@ -16,12 +18,22 @@ import { broadcastPatch } from '@server/realtime';
 //   lobby         — return to selection with the same players (host: play another round)
 export async function POST(request, { params }) {
   const { id } = await params;
-  const { error } = await requireUser();
+  const { user, error } = await requireUser();
   if (error) return error;
 
   try {
     const body = await request.json().catch(() => ({}));
     const { action } = body || {};
+
+    // Every one of these transitions is deliberately open to EVERY player —
+    // that is what keeps a room from wedging when whoever "should" advance it
+    // has disconnected. Every player *in this room*, though: rooms are
+    // reachable by id to anyone signed in, so without this any user could
+    // restart, skip through, or end a match they were not playing in.
+    const session = getEntity('GameSession', id);
+    if (!session) return NextResponse.json({ message: 'Session not found' }, { status: 404 });
+    const { error: notInRoom } = requireSessionPlayer(session, user);
+    if (notInRoom) return NextResponse.json({ message: notInRoom }, { status: 403 });
 
     let outcome;
     switch (action) {
