@@ -44,6 +44,7 @@ export async function PATCH(request, { params }) {
       input = authorizeRoundWrite(input, user, { existing });
     }
     if (type === 'GameSession') {
+      await store.ensureSessionsLoaded();
       const existing = await store.get('GameSession', id);
       if (!existing) return NextResponse.json({ message: 'Not found' }, { status: 404 });
       input = await authorizeSessionUpdate(input, user, existing);

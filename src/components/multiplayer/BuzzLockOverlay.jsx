@@ -1,15 +1,21 @@
 import { Lock, Zap } from 'lucide-react';
 
-// Shown to players who are NOT the one buzzing / answering bonus
-export default function BuzzLockOverlay({ buzzState, myTeam, myPlayerId = null }) {
+// Shown to players who are NOT the one buzzing / answering bonus.
+//
+// `closed` is "the question is over for everyone", which is NOT the same as
+// "has a result": a tossup somebody got wrong reopens for the other teams while
+// still carrying the loser's result. Gating on the result meant that the second
+// team's buzz showed no lock at all — everyone else's buzzer stayed lit against
+// a question that had already been taken.
+export default function BuzzLockOverlay({ buzzState, myTeam, myPlayerId = null, closed = false }) {
   if (!buzzState) return null;
 
   // A pending buzz is a claim that has reached the server but not yet cleared
   // arbitration. It locks the room exactly like a settled buzz — that early
   // lock is the point — so it names the same way, and only the display name can
   // still change if someone else turns out to have buzzed first.
-  const pending = !buzzState.result && !buzzState.dead ? buzzState.pending_buzz : null;
-  const buzzer = buzzState.buzzed_player_id
+  const pending = closed ? null : buzzState.pending_buzz;
+  const buzzer = (buzzState.buzzed_player_id && !closed)
     ? { name: buzzState.buzzed_display_name }
     : pending ? { name: pending.display_name } : null;
 
@@ -19,7 +25,7 @@ export default function BuzzLockOverlay({ buzzState, myTeam, myPlayerId = null }
   // dead buzzer and nothing on screen telling them why.
   const bonusOwner = buzzState.bonus_for_team || buzzState.bonus_for_player || null;
   const isBonusLock = !!bonusOwner && !buzzer;
-  const isAnsweringLock = buzzer && !buzzState.result;
+  const isAnsweringLock = !!buzzer;
 
   if (isAnsweringLock) {
     return (

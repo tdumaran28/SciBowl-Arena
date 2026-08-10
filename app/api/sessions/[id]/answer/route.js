@@ -3,6 +3,7 @@ import { requireUser, errorResponse } from '@server/auth';
 import { getEntity } from '@server/db';
 import { applyAnswer } from '@server/match';
 import { requireSessionPlayer } from '@server/sessions';
+import { ensureSessionsLoaded } from '@server/store';
 import { broadcastPatch } from '@server/realtime';
 
 // Scoring is applied server-side so two players resolving at nearly the same
@@ -17,6 +18,9 @@ export async function POST(request, { params }) {
   if (error) return error;
 
   try {
+    // Rooms outlive the process: they are mirrored to Postgres and put back on
+    // the first request after a restart or an idle spin-down.
+    await ensureSessionsLoaded();
     const body = await request.json().catch(() => ({}));
     const {
       result, type, interrupted,

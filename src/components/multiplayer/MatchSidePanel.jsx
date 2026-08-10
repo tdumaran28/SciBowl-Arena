@@ -65,15 +65,19 @@ export default function MatchSidePanel({ session, myPlayerId, onLeave, getQuesti
       <Card className="border-border/60">
         <CardHeader className="pb-2">
           <CardTitle className="text-base flex items-center gap-2">
-            <Trophy className="w-4 h-4 text-amber-500" /> Points Log
+            <Trophy className="w-4 h-4 text-amber-500" /> Question Log
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-1 max-h-72 overflow-y-auto">
-          {events.length === 0 && <p className="text-xs text-muted-foreground">No events yet.</p>}
+          {events.length === 0 && <p className="text-xs text-muted-foreground">No questions played yet.</p>}
           {events.length > 0 && getQuestion && (
             <p className="text-[10px] text-muted-foreground/70 pb-1">Click an entry to review that question</p>
           )}
           {[...events].reverse().map((ev, i) => {
+            // A question nobody answered — it timed out, or the room stepped
+            // over it. It is in the log because it was played: leaving it out
+            // made the numbering jump and left nothing to read it back from.
+            const unanswered = ev.kind === 'dead';
             const tone = ev.kind === 'correct'
               ? 'text-emerald-600 dark:text-emerald-400'
               : ev.kind === 'neg'
@@ -90,10 +94,17 @@ export default function MatchSidePanel({ session, myPlayerId, onLeave, getQuesti
                   {positionLabel ?? ev.type}
                 </Badge>
                 <span className="flex-1 truncate text-left">
-                  {ev.player} <span className="text-muted-foreground">· {ev.team || '—'}</span>
+                  {unanswered ? (
+                    <span className="text-muted-foreground italic">No answer</span>
+                  ) : (
+                    <>{ev.player} <span className="text-muted-foreground">· {ev.team || '—'}</span></>
+                  )}
                 </span>
                 {reviewable && <Eye className="w-3 h-3 text-muted-foreground/0 group-hover:text-muted-foreground transition-colors flex-shrink-0" />}
-                <span className={cn('font-bold tabular-nums flex-shrink-0', tone)}>{ptsStr}</span>
+                <span className={cn(
+                  'font-bold tabular-nums flex-shrink-0',
+                  unanswered ? 'text-muted-foreground/60 font-normal' : tone,
+                )}>{ptsStr}</span>
               </>
             );
 

@@ -35,6 +35,9 @@ export async function GET(request, { params }) {
   const limit = url.searchParams.get('limit') || null;
 
   try {
+    // Joining by room code and the multiplayer poll both come through here, so
+    // this is the path that has to see rooms restored after a restart.
+    if (type === 'GameSession') await store.ensureSessionsLoaded();
     // Rounds are visibility-scoped: public ones plus the caller's own private
     // ones. Everything else lists as before.
     const records = type === 'Round'

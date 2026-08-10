@@ -82,6 +82,16 @@ export default function QuestionReader({
   resolved = false,
   onDead,
   readingStartedAt = null,
+  // Does THIS client read the question out word by word, or just show it?
+  //
+  // Tossups are always read. A multiplayer bonus is read only to the team it
+  // belongs to — they are the only ones who can answer it, so they are the only
+  // ones it is being read to. Everyone else gets it as static text, which is
+  // what they had before, and no answer box.
+  wordByWord = true,
+  // The host has paused the match (a server timestamp). Shared, because a local
+  // pause would freeze one player's words while the rest of the room read on.
+  externalPausedAt = null,
   // Bumped by the parent when the server awards the buzz to someone else.
   // Buzzing is optimistic — the answer box opens on the keypress so the local
   // player feels no delay — so a lost arbitration has to take it back.
@@ -141,6 +151,14 @@ export default function QuestionReader({
   useEffect(() => { buzzingRef.current = buzzing; }, [buzzing]);
   const readingStartedAtRef = useRef(null);
   useEffect(() => { readingStartedAtRef.current = readingStartedAt; }, [readingStartedAt]);
+  const wordByWordRef = useRef(true);
+  useEffect(() => { wordByWordRef.current = wordByWord; }, [wordByWord]);
+  const canAdvanceRef = useRef(true);
+  useEffect(() => { canAdvanceRef.current = canAdvance; }, [canAdvance]);
+
+  // Static text instead of a read: a display-mode choice, or a bonus belonging
+  // to another team.
+  const showsStatically = settings?.display_mode === 'full' || (multiplayer && !wordByWord);
 
   const isFullMode = settings?.display_mode === 'full';
   const isMC = question?.format === 'Multiple Choice';
@@ -244,15 +262,20 @@ export default function QuestionReader({
     wordIdxRef.current = 0;
     deadReportedRef.current = false;
 
-    if (settingsRef.current?.display_mode === 'full' || (multiplayer && questionRef.current?.type === 'BONUS')) {
+    // A bonus used to be dumped out whole to everyone. It is now read like a
+    // tossup — but only to the team it belongs to, since they are the only ones
+    // who may answer it; the rest of the room still gets the static text.
+    if (settingsRef.current?.display_mode === 'full' || (multiplayer && !wordByWordRef.current)) {
       setAllWordsShown(true);
     } else if (!externalBuzzedRef.current && !resolvedRef.current) {
       startWordByWord();
     }
     // questionKey, not number/type — see its definition. `question` itself is a
     // fresh object every render (marathon derives it, boss-ups rewrite it), so
-    // it cannot be the dependency either.
-  }, [questionKey, startWordByWord, multiplayer]);
+    // it cannot be the dependency either. `wordByWord` is in here because it
+    // decides which of the two branches above runs, and a bonus's ownership
+    // lands in the same frame as the question itself.
+  }, [questionKey, startWordByWord, multiplayer, wordByWord]);
 
   // ── Sync: fast-forward the visible word position to where every client
   // should be, given the server-stamped reading start. ───────────────────────
@@ -266,7 +289,29 @@ export default function QuestionReader({
     const cfg = settingsRef.current;
     if (!ts || cfg?.display_mode === 'full') return;
     const q = questionRef.current;
-    if (!q || q.type === 'BONUS') return;
+    if (!q) return;
+    // A bonus is only read to the team it belongs to; nobody else has a
+    // position to keep in step.
+    if (q.type === 'BONUS' && !wordByWordRef.current) return;
+
+    // The reading is FROZEN — someone is answering, the host has paused, or the
+    // question is over. Without this the drift correction below fought the
+    // freeze and won: two seconds after a buzz it fast-forwarded to "where the
+    // clock says we should be" and restarted the interval, so the question
+    // carried on reading itself out from under the player who had buzzed.
+    //
+    // Nothing is lost by skipping: `reading_started_at` is pushed forward by
+    // the frozen interval when the question reopens (server/match.js), so the
+    // next sync lands on the word it stopped on.
+    if (
+      buzzingRef.current ||
+      externalBuzzedRef.current ||
+      resolvedRef.current ||
+      answerResultRef.current ||
+      deadRef.current ||
+      pausedRef.current
+    ) return;
+
     const wpm = cfg?.wpm || 250;
     const msPerWord = (60 / wpm) * 1000;
     const elapsed = serverNow() - ts;
@@ -327,6 +372,49 @@ export default function QuestionReader({
     const interval = setInterval(syncToTimestamp, 2000);
     return () => clearInterval(interval);
   }, [multiplayer, readingStartedAt, syncToTimestamp]);
+
+  // ── The question is over: show all of it ───────────────────────────────────
+  // Someone got it (possibly on an interrupt, mid-sentence), or it died. There
+  // is no longer anything to withhold, and leaving the text frozen half-read
+  // meant the room never saw the rest of the question it had just played.
+  useEffect(() => {
+    if (!multiplayer || !resolved) return;
+    clearInterval(wordIntervalRef.current);
+    window.speechSynthesis?.cancel();
+    setAllWordsShown(true);
+  }, [multiplayer, resolved]);
+
+  // ── Host pause: freeze/resume for the whole room ──────────────────────────
+  // Driven by the server timestamp, not by a local toggle, so every screen
+  // stops on the same word and the buzzer is shut for everyone at once.
+  const sawPauseRef = useRef(false);
+  useEffect(() => {
+    if (!multiplayer) return;
+    const isPaused = !!externalPausedAt;
+    // The reader is remounted for every question, so the first run of this
+    // effect is not a pause change — resuming there would restart a read the
+    // question-change effect has just started.
+    if (!sawPauseRef.current && !isPaused) { sawPauseRef.current = true; return; }
+    sawPauseRef.current = true;
+    pausedRef.current = isPaused;
+    setPaused(isPaused);
+    if (isPaused) {
+      clearInterval(wordIntervalRef.current);
+      window.speechSynthesis?.cancel();
+      return;
+    }
+    // Resuming picks up from the word it stopped on; the server has already
+    // pushed `reading_started_at` forward by the paused interval, so the drift
+    // sync agrees rather than yanking everyone ahead.
+    if (
+      !allWordsShownRef.current && !buzzingRef.current && !externalBuzzedRef.current &&
+      !resolvedRef.current && !answerResultRef.current && !deadRef.current &&
+      settingsRef.current?.display_mode !== 'full' &&
+      (questionRef.current?.type !== 'BONUS' || wordByWordRef.current)
+    ) {
+      runWordByWord(wordIdxRef.current);
+    }
+  }, [multiplayer, externalPausedAt, runWordByWord]);
 
   // ── Buzz revoked: another player won the arbitration ──────────────────────
   // Roll the optimistic local buzz back and rejoin the reading where the rest
@@ -432,15 +520,21 @@ export default function QuestionReader({
 
   // ── Answer grace period countdown ─────────────────────────────────────────
   useEffect(() => {
-    if (answerTimeLeft === null || answerResult) return;
+    // A paused match must not tick down the answer clock — the host stopped the
+    // room, and timing out the player holding the buzz while it is stopped
+    // scores a neg against them for the pause.
+    if (answerTimeLeft === null || answerResult || paused) return;
     if (answerTimeLeft <= 0) { doSubmitAnswer(null); return; }
     const t = setTimeout(() => setAnswerTimeLeft(v => v - 1), 1000);
     return () => clearTimeout(t);
-  }, [answerTimeLeft, answerResult, doSubmitAnswer]);
+  }, [answerTimeLeft, answerResult, paused, doSubmitAnswer]);
 
   // ── Core actions (ref-based to avoid stale closures) ─────────────────────
   const stateRef = useRef({});
-  stateRef.current = { buzzing, answerResult, dead, externalBuzzed, allWordsShown, visibleWords, buzzedEarly, buzzEnabled };
+  stateRef.current = {
+    buzzing, answerResult, dead, externalBuzzed, allWordsShown, visibleWords,
+    buzzedEarly, buzzEnabled, paused, multiplayer,
+  };
 
   const handleBuzzFn = useCallback(() => {
     // Stamp the buzz before anything else runs: this instant (on the server's
@@ -451,6 +545,9 @@ export default function QuestionReader({
     const q = questionRef.current;
     const cfg = settingsRef.current;
     if (s.answerResult || s.buzzing || s.dead || s.externalBuzzed || !s.buzzEnabled) return;
+    // A paused match takes no buzzes — the server rejects them anyway, and an
+    // optimistic local buzz here would open an answer box that then vanished.
+    if (s.paused) return;
     if (q?.type === 'BONUS' && !s.allWordsShown) return;
     if (cfg?.display_mode !== 'full' && s.visibleWords.length === 0) return;
 
@@ -470,6 +567,10 @@ export default function QuestionReader({
   }, [onBuzz]);
 
   const handlePause = useCallback(() => {
+    // In a room the pause belongs to the whole match: hand it to the server and
+    // let the frame that comes back stop every screen, this one included.
+    // Toggling locally would freeze one player's words while the rest read on.
+    if (multiplayer) { onPause?.(); return; }
     if (pausedRef.current) {
       pausedRef.current = false;
       setPaused(false);
@@ -482,7 +583,7 @@ export default function QuestionReader({
       clearInterval(wordIntervalRef.current);
       window.speechSynthesis?.cancel();
     }
-  }, [startWordByWord]);
+  }, [startWordByWord, multiplayer, onPause]);
 
   // ── Keyboard shortcuts ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -505,7 +606,12 @@ export default function QuestionReader({
         onQuit?.();
         return;
       }
-      if ((e.key === 'n' || e.key === 'N') && !inInput && (s.answerResult || s.dead)) {
+      // Next. Solo goes on this player's own result; in a room it goes on
+      // whether the match rules let THIS player move it on — the winning team
+      // after a tossup, anyone after a bonus or a dead question. `onNext` is
+      // only supplied when they may, so the shortcut and the button agree.
+      const mayAdvance = s.multiplayer ? canAdvanceRef.current : (s.answerResult || s.dead);
+      if ((e.key === 'n' || e.key === 'N') && !inInput && mayAdvance) {
         e.preventDefault();
         onNext?.();
       }
@@ -591,7 +697,15 @@ export default function QuestionReader({
         )}
         {paused && (
           <Badge variant="outline" className="bg-amber-100 text-amber-700 dark:bg-amber-900/20 dark:text-amber-400 text-xs">
-            Paused
+            {multiplayer ? 'Paused by the host' : 'Paused'}
+          </Badge>
+        )}
+        {/* Read to the team it belongs to; everyone else is looking at the same
+            text, but static, and cannot answer it. Saying so beats leaving the
+            other teams wondering why their buzzer is dead. */}
+        {multiplayer && showsStatically && isBonus && (
+          <Badge variant="outline" className="text-xs text-muted-foreground">
+            Read to {isBonusFor || 'the other team'}
           </Badge>
         )}
       </div>
@@ -708,10 +822,12 @@ export default function QuestionReader({
             size="lg"
             className="flex-1 font-semibold"
             onClick={handleBuzzFn}
-            disabled={externalBuzzed || !buzzEnabled || (isBonus && !allWordsShown)}
+            disabled={externalBuzzed || !buzzEnabled || paused || (isBonus && !allWordsShown)}
           >
             <Zap className="w-4 h-4 mr-2" />
-            {!allWordsShown && !isBonus ? 'Interrupt (Space)' : 'Buzz In (Space)'}
+            {paused
+              ? 'Paused'
+              : !allWordsShown && !isBonus ? 'Interrupt (Space)' : 'Buzz In (Space)'}
           </Button>
           {onPause && (
             <Button variant="outline" size="lg" onClick={handlePause} title={paused ? 'Resume (P)' : 'Pause (P)'}>

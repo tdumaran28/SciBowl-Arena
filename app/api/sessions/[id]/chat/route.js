@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { requireUser, errorResponse } from '@server/auth';
 import { getEntity, updateEntity } from '@server/db';
 import { requireSessionPlayer } from '@server/sessions';
+import { ensureSessionsLoaded } from '@server/store';
 import { broadcastPatch } from '@server/realtime';
 
 // Chat is a server-side append so two people sending at the same moment can't
@@ -16,6 +17,7 @@ export async function POST(request, { params }) {
   if (error) return error;
 
   try {
+    await ensureSessionsLoaded();
     const body = await request.json().catch(() => ({}));
     const session = getEntity('GameSession', id);
     if (!session) return NextResponse.json({ message: 'Session not found' }, { status: 404 });

@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import { requireUser, errorResponse } from '@server/auth';
 import { getEntity } from '@server/db';
 import { requireSessionPlayer } from '@server/sessions';
+import { ensureSessionsLoaded } from '@server/store';
+import { questionClosed } from '@server/match';
 import { claimBuzz, ARBITRATION_WINDOW_MS } from '@server/buzz';
 
 // Buzz claim with latency-compensated arbitration.
@@ -17,6 +19,9 @@ export async function POST(request, { params }) {
   if (error) return error;
 
   try {
+    // Rooms outlive the process: they are mirrored to Postgres and put back on
+    // the first request after a restart or an idle spin-down.
+    await ensureSessionsLoaded();
     const body = await request.json().catch(() => ({}));
     const session = getEntity('GameSession', id);
     if (!session) return NextResponse.json({ message: 'Session not found' }, { status: 404 });
@@ -31,8 +36,14 @@ export async function POST(request, { params }) {
     if (bs.buzzed_player_id && !bs.result) {
       return NextResponse.json({ message: 'Buzz already claimed', session }, { status: 409 });
     }
-    if (bs.result === 'correct' || bs.dead) {
+    // `questionClosed`, not `!!result`: a tossup someone got WRONG still carries
+    // their result while it is live for the other teams, and reading that as
+    // "over" is exactly what stopped the next team from buzzing after a neg.
+    if (questionClosed(bs)) {
       return NextResponse.json({ message: 'Question already resolved', session }, { status: 409 });
+    }
+    if (bs.paused_at) {
+      return NextResponse.json({ message: 'The host has paused the match', session }, { status: 409 });
     }
 
     const { buzzed_at } = body || {};

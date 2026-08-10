@@ -14,8 +14,9 @@ import ChatBox from '@/components/multiplayer/ChatBox';
 import BuzzLockOverlay from '@/components/multiplayer/BuzzLockOverlay';
 import BuzzResultBanner from '@/components/multiplayer/BuzzResultBanner';
 import MatchSidePanel from '@/components/multiplayer/MatchSidePanel';
+import EndMarathonVote from '@/components/multiplayer/EndMarathonVote';
 import RoundSelect from '@/components/game/RoundSelect';
-import { Users, Plus, LogIn, Crown, Trophy, Zap, Copy, CheckCircle, LogOut, Globe, Lock, Unlock, Timer, Flag, BookOpen, RotateCcw, Sparkles, Swords } from 'lucide-react';
+import { Users, Plus, LogIn, Crown, Trophy, Zap, Copy, CheckCircle, LogOut, Globe, Lock, Unlock, Timer, Pause, Flag, BookOpen, RotateCcw, Sparkles, Swords } from 'lucide-react';
 import { toast } from 'sonner';
 import { buildMarathonPools, marathonQuestionAt, randomSeed } from '@/utils/marathon';
 import { SCORING, applyQuestionRules, asBossUp, pairPositions } from '@/utils/parseRound';
@@ -27,6 +28,11 @@ import { syncClock, serverNow } from '@/lib/clock';
 // Mirrors STALE_BUZZ_MS in server/match.js — the client only decides when to
 // ask; the server decides whether the hold really is stale.
 const STALE_BUZZ_MS = 15000;
+
+// Mirrors END_VOTE_MS in server/match.js — how long a request to end a marathon
+// stands before it lapses. The client only counts down and reports; the server
+// decides whether it really has.
+const END_VOTE_MS = 60000;
 
 const DEFAULT_SETTINGS = {
   read_aloud: false,
@@ -131,6 +137,9 @@ export default function Multiplayer() {
   const isHost = session?.host_id === myPlayerId;
   const buzzState = session?.buzz_state || null;
   const currentIndex = session?.current_question_index || 0;
+  // Everyone plays for a team. Until that is true there is nothing to start.
+  const playersWithoutTeam = players.filter(p => !p.team);
+  const rosterReady = teams.length > 0 && playersWithoutTeam.length === 0;
 
   // Marathon sessions carry no question list — every client derives the same
   // infinite sequence from the shared { seed, round_ids, subject_freq } config.
@@ -189,7 +198,7 @@ export default function Multiplayer() {
     isBonusForOther, someoneElseBuzzed, iAmBuzzing,
     isBonusQ, questionDead, resolved, wrongLimit,
     canBuzz, canAnswerBonus, canAdvance, revealAnswer,
-    bonusEarned, bonusOwnerPresent,
+    bonusEarned, bonusIsMine, bonusOwnerPresent, pausedAt,
   } = deriveMatchState({ session, myPlayerId, question: currentQuestion });
 
   // Measure this machine's offset from the server clock before anything
@@ -378,15 +387,73 @@ export default function Multiplayer() {
     setView('room');
   };
 
-  // Host: close the room for everyone.
-  const handleEndGame = async () => {
+  // Host: freeze the reading for the whole room (P). Shared rather than local —
+  // a pause that only stopped the host's screen would leave everyone else being
+  // read a question the host can no longer hear.
+  const handlePauseToggle = useCallback(async () => {
     const sess = sessionRef.current;
     if (!sess) return;
-    const updated = await base44.multiplayer.next(sess.id, { next_index: 0, finished: true });
-    setSession(updated);
-    sessionRef.current = updated;
-    setView('finished');
-  };
+    try {
+      const updated = await base44.multiplayer.pause(sess.id, {
+        paused: !sess.buzz_state?.paused_at,
+      });
+      setSession(updated);
+      sessionRef.current = updated;
+    } catch {
+      toast.error('Could not pause — try again');
+    }
+  }, []);
+
+  // ── Ending a marathon ─────────────────────────────────────────────────────
+  // A marathon has no last question. Alone in the room there is nobody to ask,
+  // so the button ends it; otherwise it asks everyone else and they all have to
+  // agree. Deliberately not a host power — that is the one this replaced.
+  const endVote = session?.end_vote || null;
+
+  const handleRequestEnd = useCallback(async () => {
+    const sess = sessionRef.current;
+    if (!sess) return;
+    try {
+      const updated = await base44.multiplayer.requestEnd(sess.id, {
+        current_type: currentQuestionRef.current?.type || '',
+      });
+      setSession(updated);
+      sessionRef.current = updated;
+      if (updated.status === 'finished') setView('finished');
+      else toast('Asked the room to end the marathon', { duration: 2500 });
+    } catch (err) {
+      toast.error(err.message || 'Could not send that request');
+    }
+  }, []);
+
+  const handleVoteEnd = useCallback(async (accept) => {
+    const sess = sessionRef.current;
+    if (!sess) return;
+    try {
+      const updated = await base44.multiplayer.voteEnd(sess.id, {
+        accept,
+        current_type: currentQuestionRef.current?.type || '',
+      });
+      setSession(updated);
+      sessionRef.current = updated;
+      if (updated.status === 'finished') setView('finished');
+    } catch {
+      toast.error('Could not record that — try again');
+    }
+  }, []);
+
+  // Withdrawing, and reporting a request that has lapsed. Both go through the
+  // same guarded call: the server checks who is asking and how old the request
+  // is, so every client may report the lapse without racing an accept.
+  const handleClearEndRequest = useCallback(async () => {
+    const sess = sessionRef.current;
+    if (!sess?.end_vote) return;
+    try {
+      const updated = await base44.multiplayer.clearEndRequest(sess.id);
+      setSession(updated);
+      sessionRef.current = updated;
+    } catch { /* another client's report will land; the poll reconciles */ }
+  }, []);
 
   // Join by code — used by the manual input, the public games browser, and the
   // ?room= URL param (marathon rooms hand off here after creation). Players may
@@ -426,12 +493,18 @@ export default function Multiplayer() {
   const handleStartGame = async () => {
     const sess = sessionRef.current;
     if (!sess) return;
-    // The server stamps the reading clock so every client reads in step.
-    const updated = await base44.multiplayer.start(sess.id);
-    setSession(updated);
-    sessionRef.current = updated;
-    setView('playing');
-    setMyResults([]);
+    try {
+      // The server stamps the reading clock so every client reads in step. It
+      // also refuses to start until every player is on a team — the same rule
+      // the button below is disabled on, restated where it can be enforced.
+      const updated = await base44.multiplayer.start(sess.id);
+      setSession(updated);
+      sessionRef.current = updated;
+      setView('playing');
+      setMyResults([]);
+    } catch (err) {
+      toast.error(err.data?.message || 'Could not start the game');
+    }
   };
 
   // Buzz in — tossups only. The buzz instant is stamped on the client (already
@@ -550,6 +623,10 @@ export default function Multiplayer() {
     if (view !== 'playing') return;
     const holder = buzzState?.buzzed_player_id;
     if (!holder || holder === myPlayerId || buzzState?.result || buzzState?.dead) return;
+    // A stopped match is not a frozen tab. The server refuses the release while
+    // paused anyway; not asking keeps a long pause from firing a request from
+    // every client every few seconds.
+    if (buzzState?.paused_at) return;
     const heldSince = buzzState.buzzed_at || buzzState.reading_started_at || serverNow();
     const dueIn = Math.max(0, heldSince + STALE_BUZZ_MS - serverNow()) + 500;
     const timer = setTimeout(() => {
@@ -563,7 +640,8 @@ export default function Multiplayer() {
       }).catch(() => { /* another client's report will land */ });
     }, dueIn);
     return () => clearTimeout(timer);
-  }, [view, buzzState?.buzzed_player_id, buzzState?.buzzed_at, buzzState?.result, buzzState?.dead, myPlayerId]);
+  }, [view, buzzState?.buzzed_player_id, buzzState?.buzzed_at, buzzState?.result,
+    buzzState?.dead, buzzState?.paused_at, myPlayerId]);
 
   // Watchdog: a bonus whose whole team has left the room.
   //
@@ -610,6 +688,7 @@ export default function Multiplayer() {
           // Carried only onto a bonus, and only one that was earned — the loop
           // above has already stepped past any that were not.
           keep_bonus_owner: getQuestionAt(nextIdx)?.type === 'BONUS',
+          current_type: getQuestionAt(sess.current_question_index || 0)?.type || '',
         });
         setSession(updated);
         sessionRef.current = updated;
@@ -620,6 +699,7 @@ export default function Multiplayer() {
     }
 
     const qs = applyQuestionRules(rounds.find(r => r.id === sess.round_id)?.questions, sess.settings);
+    const currentType = qs[sess.current_question_index || 0]?.type || '';
 
     let nextIdx = (sess.current_question_index || 0) + 1;
     // Skip ALL consecutive unearned bonuses (covers bonus-after-bonus chains)
@@ -629,7 +709,9 @@ export default function Multiplayer() {
 
     try {
       if (nextIdx >= qs.length) {
-        const updated = await base44.multiplayer.next(sess.id, { next_index: nextIdx, finished: true });
+        const updated = await base44.multiplayer.next(sess.id, {
+          next_index: nextIdx, finished: true, current_type: currentType,
+        });
         setSession(updated);
         sessionRef.current = updated;
         setView('finished');
@@ -641,6 +723,7 @@ export default function Multiplayer() {
       const updated = await base44.multiplayer.next(sess.id, {
         next_index: nextIdx,
         keep_bonus_owner: qs[nextIdx]?.type === 'BONUS',
+        current_type: currentType,
       });
       setSession(updated);
       sessionRef.current = updated;
@@ -805,9 +888,10 @@ export default function Multiplayer() {
     const canInteract = iAmBuzzing || canAnswerBonus;
     const showLock = externalBuzzed;
 
-    // Advancing a question that is still live is a skip (the host's escape
-    // hatch), and says so.
-    const advanceIsSkip = !resolved && !questionDead;
+    // A bonus is read out word by word to the team that won it — they are the
+    // only ones who can answer it, so they are the only ones it is read to.
+    // Every other team gets the same text, static, and no answer box.
+    const readsWordByWord = !isBonusQ || bonusIsMine;
 
     return (
       <div className="p-4 lg:p-6 max-w-6xl mx-auto flex flex-col gap-4 min-h-screen">
@@ -873,6 +957,14 @@ export default function Multiplayer() {
                   resolved={resolved}
                   readingStartedAt={buzzState?.reading_started_at || null}
                   buzzRevokedAt={buzzRevokedAt}
+                  wordByWord={readsWordByWord}
+                  externalPausedAt={pausedAt}
+                  // [N] advances, on exactly the rule the button below uses.
+                  onNext={canAdvance ? handleNext : undefined}
+                  canAdvance={canAdvance}
+                  // [P] pauses the room. Host only — it stops the match for
+                  // everybody, so it is the one control that is not open to all.
+                  onPause={isHost ? handlePauseToggle : undefined}
                 />
                 {/* The correct answer is only handed over once the question is
                     finished for EVERYONE — a wrong answer leaves it live for the
@@ -885,27 +977,79 @@ export default function Multiplayer() {
                   wrongLimit={wrongLimit}
                 />
                 {showLock && (
-                  <BuzzLockOverlay buzzState={buzzState} myTeam={myTeam} myPlayerId={myPlayerId} />
+                  <BuzzLockOverlay
+                    buzzState={buzzState}
+                    myTeam={myTeam}
+                    myPlayerId={myPlayerId}
+                    closed={resolved}
+                  />
                 )}
+                {/* Only shown to whoever the rules say may move the match on:
+                    the team that just won the tossup (the bonus is theirs),
+                    anyone once a bonus is finished or a question is dead. It
+                    never appears on a live question — there is no skip. */}
                 {canAdvance && (
                   <Button
                     onClick={handleNext}
                     size="lg"
-                    variant={advanceIsSkip ? 'outline' : 'default'}
                     className="w-full font-semibold"
                   >
-                    {advanceIsSkip
-                      ? 'Skip Question →'
-                      : isMarathon || currentIndex + 1 < activeQuestions.length
-                        ? 'Next Question →'
-                        : 'See Results'}
+                    {isMarathon || currentIndex + 1 < activeQuestions.length
+                      ? 'Next Question →'
+                      : 'See Results'}
+                    <span className="ml-2 text-xs opacity-60">[N]</span>
                   </Button>
                 )}
+                {/* The rest of the room is told who it is waiting on, rather
+                    than being left looking at a finished question with nothing
+                    on screen. */}
+                {!canAdvance && resolved && (
+                  <p className="text-sm text-muted-foreground text-center py-2">
+                    Waiting for {buzzState?.result_team || buzzState?.result_player || 'the winning team'} to
+                    move on…
+                  </p>
+                )}
                 {isHost && (
-                  <Button variant="outline" className="w-full" onClick={handleEndGame}>
-                    <Flag className="w-4 h-4 mr-2" />
-                    {isMarathon ? 'End Marathon & Show Results' : 'End Round & Show Results'}
+                  <Button
+                    variant="outline"
+                    className="w-full"
+                    onClick={handlePauseToggle}
+                    disabled={resolved || questionDead}
+                  >
+                    <Pause className="w-4 h-4 mr-2" />
+                    {pausedAt ? 'Resume Match' : 'Pause Match'}
+                    <span className="ml-2 text-xs opacity-60">[P]</span>
                   </Button>
+                )}
+
+                {/* A marathon has no last question, so this is the only way it
+                    ends. Any player may ask — alone in the room it just ends,
+                    otherwise everyone else has to agree. */}
+                {isMarathon && (
+                  endVote ? (
+                    <EndMarathonVote
+                      vote={endVote}
+                      players={players}
+                      myPlayerId={myPlayerId}
+                      windowMs={END_VOTE_MS}
+                      onAccept={() => handleVoteEnd(true)}
+                      onDecline={() => handleVoteEnd(false)}
+                      onWithdraw={handleClearEndRequest}
+                      onLapsed={handleClearEndRequest}
+                    />
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="w-full text-muted-foreground hover:text-foreground"
+                      onClick={handleRequestEnd}
+                    >
+                      <Flag className="w-3.5 h-3.5 mr-1.5" />
+                      {players.length <= 1
+                        ? 'End Marathon & Show Results'
+                        : 'Ask the room to end the marathon'}
+                    </Button>
+                  )
                 )}
               </>
             ) : null}
@@ -913,6 +1057,29 @@ export default function Multiplayer() {
 
           {/* Side panel */}
           <div className="space-y-3">
+            {/* Joining mid-match lands you in the room with no team — and the
+                room's only roster is the teams panel, which lives in the lobby.
+                Without this there was nowhere to pick one from, so a late
+                joiner played the rest of the match scoring for nobody. */}
+            {!myTeam && (
+              <Card className="border-amber-500/40 bg-amber-500/5">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-base">Join a team to play</CardTitle>
+                </CardHeader>
+                <CardContent className="pt-0">
+                  <p className="text-xs text-muted-foreground mb-2">
+                    You joined after the match started. Pick a team — your answers
+                    score for them from the next question on.
+                  </p>
+                  <TeamPanel
+                    session={session}
+                    myPlayerId={myPlayerId}
+                    onUpdateSession={handleUpdateSession}
+                    hostId={session?.host_id}
+                  />
+                </CardContent>
+              </Card>
+            )}
             <MatchSidePanel
               session={session}
               myPlayerId={myPlayerId}
@@ -992,23 +1159,11 @@ export default function Multiplayer() {
               </div>
             )}
 
-            <div>
-              <p className="text-sm font-medium mb-2">Players ({players.length})</p>
-              <div className="space-y-1.5">
-                {players.map(p => (
-                  <div key={p.user_id} className="flex items-center gap-2 bg-muted/50 rounded-lg px-3 py-2">
-                    <div className="w-7 h-7 rounded-full bg-primary/20 flex items-center justify-center text-xs font-bold text-primary">
-                      {p.display_name?.[0]?.toUpperCase()}
-                    </div>
-                    <span className="text-sm font-medium flex-1">{p.display_name}</span>
-                    {p.team && <Badge variant="outline" className="text-xs">{p.team}</Badge>}
-                    {p.user_id === session?.host_id && <Crown className="w-3.5 h-3.5 text-amber-500" />}
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <TeamPanel session={session} myPlayerId={myPlayerId} onUpdateSession={handleUpdateSession} />
+            {/* There is no separate Players list: every player is on a team
+                before the match starts, so the teams panel already shows the
+                whole room — and showing the same names twice made the two
+                disagree about who was in what. */}
+            <TeamPanel session={session} myPlayerId={myPlayerId} onUpdateSession={handleUpdateSession} hostId={session?.host_id} />
 
             {/* Round practice: the host picks the packet here, so returning to
                 the room after a finished round is also how you choose the next
@@ -1032,12 +1187,29 @@ export default function Multiplayer() {
               </p>
             )}
 
+            {/* Teams are not optional. A player with no team has no side to
+                score for, no lockout to share and no bonus to be dealt, so the
+                match cannot start until everyone has joined one — enforced on
+                the server too, in case a stale client presses Start. */}
+            {playersWithoutTeam.length > 0 && (
+              <p className="text-sm text-amber-600 dark:text-amber-400">
+                {playersWithoutTeam.some(p => p.user_id === myPlayerId)
+                  ? 'Join a team above — or create one — before the match can start.'
+                  : `Waiting on ${playersWithoutTeam.map(p => p.display_name).join(', ')} to join a team.`}
+              </p>
+            )}
+            {teams.length === 0 && players.length > 0 && (
+              <p className="text-sm text-muted-foreground">
+                No teams yet. Create one above to get started.
+              </p>
+            )}
+
             <div className="flex gap-2">
               {isHost ? (
                 <Button
                   className="flex-1"
                   onClick={handleStartGame}
-                  disabled={!isMarathon && !session?.round_id}
+                  disabled={(!isMarathon && !session?.round_id) || !rosterReady}
                 >
                   <Zap className="w-4 h-4 mr-2" /> Start Game
                 </Button>

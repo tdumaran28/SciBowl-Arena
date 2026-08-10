@@ -73,6 +73,18 @@ const client = enabled
   ? createClient(url, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } })
   : null;
 
+/**
+ * The raw PostgREST client, for tables that are not entity types.
+ *
+ * `game_sessions` is the only one: a live match is not stored through the
+ * entity layer (it has to stay a synchronous in-process read-modify-write, see
+ * server/db.js) — it is *mirrored* to Postgres so a restart doesn't end every
+ * game. server/sessionStore.js owns that table and nothing else touches it.
+ */
+export function rawClient() {
+  return client;
+}
+
 // Row → entity record: unpack `data`, then overlay the real columns under
 // their entity-field names (so a Round row's `name` column surfaces as `title`).
 function toRecord(type, row) {

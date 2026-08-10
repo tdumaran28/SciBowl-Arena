@@ -55,20 +55,34 @@ export function deriveMatchState({ session, myPlayerId, question }) {
   const bonusEarned = !!(bs?.bonus_for_team || bs?.bonus_for_player_id || bs?.bonus_for_player);
   const isBonusForOther = bonusEarned && !bonusIsMine;
 
+  // Is the question over for everybody? NOT the same as "has a result": a wrong
+  // tossup answer leaves the result fields populated while the question is
+  // still live for the other teams. Everything about the buzzer keys on this,
+  // because keying it on `result` meant the second team's buzz was read as
+  // arriving after the question had ended — the lock never showed, and the
+  // server rejected the claim outright (server/buzz.js).
+  //
+  // Mirrors questionClosed() in server/match.js.
+  const closed = !!bs?.dead || bs?.result === 'correct' || !!bs?.bonus_answered_by;
+
   // A provisional lock: a claim that reached the server but has not yet cleared
   // arbitration. Treated exactly like a settled buzz — that is what takes the
   // lockout delay down to a single network hop — and replaced by the
   // authoritative frame when the window closes.
-  const pendingBuzz = !bs?.result && !bs?.dead ? (bs?.pending_buzz || null) : null;
+  const pendingBuzz = closed ? null : (bs?.pending_buzz || null);
+  const heldBuzz = bs?.buzzed_player_id && !closed ? bs.buzzed_player_id : null;
   const someoneElseBuzzed = !!(
-    (bs?.buzzed_player_id && bs.buzzed_player_id !== myPlayerId && !bs.result) ||
-    (pendingBuzz && pendingBuzz.player_id !== myPlayerId && !bs?.buzzed_player_id)
+    (heldBuzz && heldBuzz !== myPlayerId) ||
+    (pendingBuzz && pendingBuzz.player_id !== myPlayerId && !heldBuzz)
   );
   const iAmBuzzing = !!(
-    (bs?.buzzed_player_id === myPlayerId && !bs.result) ||
-    (pendingBuzz && pendingBuzz.player_id === myPlayerId && !bs?.buzzed_player_id)
+    heldBuzz === myPlayerId ||
+    (pendingBuzz && pendingBuzz.player_id === myPlayerId && !heldBuzz)
   );
   const buzzerName = bs?.buzzed_display_name || pendingBuzz?.display_name || null;
+
+  // The host paused the reading for the whole room (server/match.js).
+  const pausedAt = closed ? null : (bs?.paused_at || null);
 
   const present = (id) => !id || players.some(p => p.user_id === id);
 
@@ -87,9 +101,22 @@ export function deriveMatchState({ session, myPlayerId, question }) {
   // it has taken its format's limit of wrong answers (2 multiple choice, 3 short
   // answer — server/match.js owns the rule; mirrored here so the lockout shows
   // the instant this client sees the answer rather than a frame later).
-  const allTeamsAnswered = teams.length > 0 && teams.every(t => bs?.negged_teams?.includes(t.name));
-  const allPlayersAnswered = isFFA && players.length > 0 &&
-    players.every(p => bs?.negged_players?.includes(p.user_id));
+  //
+  // "Everyone has missed it" asks whether anyone left in the room may still
+  // take the question.
+  //
+  // It is asked of the players who are actually HERE, not of the `teams` array:
+  // a team keeps its row after its last player leaves, so counting rows meant a
+  // question stayed "live for Blue" when Blue had gone home — and with the host
+  // no longer able to force the match on, a room of nothing but locked-out
+  // players had no way to move. Written per player rather than per team so it
+  // covers a free-for-all and a room with unassigned players in the same
+  // sentence. Mirrors roomExhausted() in server/match.js.
+  const roomExhausted = players.length > 0 && !players.some(p => (
+    p.team
+      ? !(bs?.negged_teams || []).includes(p.team)
+      : !(bs?.negged_players || []).includes(p.user_id)
+  ));
   const wrongLimit = wrongLimitFor(question?.format);
   const hitWrongLimit = isTossupQ && (bs?.wrong_count || 0) >= wrongLimit;
   // A bonus only exists for the team that earned it, so there are two ways for
@@ -98,8 +125,8 @@ export function deriveMatchState({ session, myPlayerId, question }) {
   // (An unowned bonus should never be shown at all: the advance path skips it.
   // This is the backstop for if one ever is.)
   const bonusUnanswerable = isBonusQ && (!bonusEarned || !bonusOwnerPresent);
-  const questionDead = !!bs?.dead || hitWrongLimit || allTeamsAnswered ||
-    allPlayersAnswered || bonusUnanswerable;
+  const questionDead = !!bs?.dead || hitWrongLimit ||
+    (isTossupQ && roomExhausted) || bonusUnanswerable;
 
   // Resolved: dead, or answered — where a tossup is only "answered" by a
   // CORRECT answer (a wrong one leaves it live for the other teams) while a
@@ -119,26 +146,47 @@ export function deriveMatchState({ session, myPlayerId, question }) {
     !isBonusForOther &&
     !iAmBuzzing;
 
-  // Advancing. A dead question is advanceable by ANYONE, unconditionally — that
-  // is the escape hatch that keeps a match from wedging, so it depends on
-  // nothing but the question being over. On a correct answer the winner
-  // advances (they own the bonus that follows), with fallbacks so the room can
-  // always move: the host, and anyone at all once whoever the room is waiting
-  // on is no longer here.
+  // ── Who may move the match on ─────────────────────────────────────────────
+  //
+  // Deliberately NOT the host. Advancing used to be a host power on top of
+  // everything else, which made two things possible that shouldn't be: skipping
+  // a question that was still being played, and taking the next question away
+  // from the team that had just won the tossup — the bonus is theirs, so the
+  // pace of getting to it is theirs too.
+  //
+  // The rules, in the order they are read:
+  //   • the question is over for everyone (dead, or a resolved bonus) — anyone;
+  //   • a tossup was won — only the winning side, since the bonus is theirs;
+  //   • the question is still live — nobody. There is no skip.
+  //
   // Same rule as bonus ownership: a result recorded against a team is the whole
   // team's, and one recorded against nobody's team is that player's — so a
   // player with no team can still advance the tossup they just won.
   const iWonThis = bs?.result_team
     ? !!(myTeam && bs.result_team === myTeam)
     : bs?.result_player_id === myPlayerId;
+  // …and if none of them are still here, it falls to whoever is, so the room
+  // is never waiting on somebody who has gone.
+  const winnerSidePresent = bs?.result_team
+    ? players.some(p => p.team === bs.result_team)
+    : present(bs?.result_player_id);
   const waitingOnAbsentee = bonusUnanswerable || !present(bs?.buzzed_player_id);
+
+  // An untimed room has no clock to kill a question nobody buzzes, and there is
+  // no host override any more — so without this a room that turned the timer
+  // off would stop at the first question everyone sat out. Open to every
+  // player, not to the host: it is an escape hatch, not a privilege.
+  const untimedStall = session?.settings?.timed === false &&
+    !resolved && !heldBuzz && !pendingBuzz;
+
   const canAdvance = questionDead ||
     waitingOnAbsentee ||
-    isHost ||
+    untimedStall ||
     (resolved && (
-      (bs?.result === 'correct' && iWonThis) ||
-      (isBonusQ && !!bs?.result && (iWonThis || bonusIsMine)) ||
-      !present(bs?.result_player_id)
+      // A bonus is finished for the whole room however it ended, so anyone may
+      // press on rather than the room waiting on one team.
+      isBonusQ ||
+      (bs?.result === 'correct' && (iWonThis || !winnerSidePresent))
     ));
 
   // The correct answer is handed to the UI only once the question is over for
@@ -151,8 +199,8 @@ export function deriveMatchState({ session, myPlayerId, question }) {
     isTossupQ, isBonusQ,
     iAmNegged, bonusIsMine, bonusEarned, isBonusForOther,
     bonusOwnerPresent, bonusUnanswerable, canAnswerBonus,
-    someoneElseBuzzed, iAmBuzzing, pendingBuzz, buzzerName,
-    questionDead, resolved, wrongLimit, canBuzz, canAdvance, revealAnswer,
+    someoneElseBuzzed, iAmBuzzing, pendingBuzz, buzzerName, pausedAt,
+    questionDead, resolved, closed, wrongLimit, canBuzz, canAdvance, revealAnswer,
     iWonThis, waitingOnAbsentee,
   };
 }

@@ -20,8 +20,9 @@ process.chdir(tmp);
 
 const { createEntity, getEntity } = await import('./db.js');
 const {
-  applyAnswer, applyDead, applyAdvance, applyStart, applyStaleBuzzRelease,
-  STALE_BUZZ_MS, SCORING,
+  applyAnswer, applyDead, applyAdvance, applyStart, applyStaleBuzzRelease, applyPause,
+  applyEndRequest, applyEndVote, applyEndVoteClear, resolveEndVoteAfterLeave,
+  STALE_BUZZ_MS, END_VOTE_MS, SCORING,
 } = await import('./match.js');
 // The client's half of the rules — the actual module the multiplayer view
 // renders from, not a copy of it. A softlock is a disagreement between the two
@@ -713,6 +714,321 @@ test('no bonus state leaves the room with nothing to do', () => {
       }
     }
   }
+});
+
+// ── Who may move the match on ───────────────────────────────────────────────
+//
+// Advancing used to be a host power on top of everything else, which made two
+// things possible that shouldn't be: skipping a question that was still being
+// played, and taking the next question away from the team that had just won the
+// tossup — the bonus is theirs, so getting to it is theirs.
+
+/** Two teams: Red = a, b · Blue = c, d. `a` hosts. */
+function twoTeams() {
+  const teams = [{ name: 'Red', captain_id: 'a' }, { name: 'Blue', captain_id: 'c' }];
+  const s = makeSession({ teams, playerIds: ['a', 'b', 'c', 'd'] });
+  const live = getEntity('GameSession', s.id);
+  live.players = live.players.map(p => ({ ...p, team: ['a', 'b'].includes(p.user_id) ? 'Red' : 'Blue' }));
+  live.host_id = 'a';
+  return s.id;
+}
+
+test('a won tossup is advanced by the winning team and nobody else', () => {
+  const id = twoTeams();
+  const cur = answer(id, 'd', 'correct', { team: 'Blue' });   // Blue wins it
+
+  for (const p of ['c', 'd']) {
+    assert.equal(clientView(cur, { myPlayerId: p }).canAdvance, true,
+      `${p} won it, and the bonus that follows is theirs`);
+  }
+  for (const p of ['a', 'b']) {
+    assert.equal(clientView(cur, { myPlayerId: p }).canAdvance, false,
+      `${p} lost it — including A, who is the host`);
+  }
+});
+
+test('the host cannot skip a question that is still being played', () => {
+  const id = twoTeams();
+  for (const p of ['a', 'b', 'c', 'd']) {
+    assert.equal(clientView(getEntity('GameSession', id), { myPlayerId: p }).canAdvance, false,
+      `${p} must not be able to skip a live question`);
+  }
+  // …and a wrong answer leaves it live for the others, so still nobody.
+  const cur = answer(id, 'a', 'wrong', { team: 'Red' });
+  for (const p of ['a', 'b', 'c', 'd']) {
+    assert.equal(clientView(cur, { myPlayerId: p }).canAdvance, false);
+  }
+  assert.equal(clientView(cur, { myPlayerId: 'c' }).canBuzz, true, 'Blue can still take it');
+});
+
+test('a finished bonus is advanced by everyone, whichever way it went', () => {
+  for (const outcome of ['correct', 'wrong']) {
+    const id = bonusForRed();
+    applyAnswer(id, {
+      playerId: 'a', displayName: 'A', team: 'Red', result: outcome, type: 'BONUS',
+    });
+    const cur = getEntity('GameSession', id);
+    for (const p of ['a', 'b', 'c', 'd']) {
+      assert.equal(clientView(cur, { myPlayerId: p, isBonus: true }).canAdvance, true,
+        `${p} may move on from a ${outcome} bonus`);
+    }
+  }
+});
+
+test('a question nobody left in the room can answer is dead', () => {
+  // Red misses it and Blue walks out. The `teams` array still lists Blue, so
+  // counting team rows read the question as live for a team that had gone —
+  // and with no host override, nobody could buzz it or move past it.
+  const id = twoTeams();
+  answer(id, 'a', 'wrong', { team: 'Red' });
+  const cur = getEntity('GameSession', id);
+  cur.players = cur.players.filter(p => p.team !== 'Blue');
+
+  for (const p of ['a', 'b']) {
+    const v = clientView(cur, { myPlayerId: p });
+    assert.equal(v.dead, true, `${p} sees a question no one present may answer as dead`);
+    assert.equal(v.canAdvance, true, `${p} may move the room on`);
+  }
+});
+
+test('an untimed room can always move on from a question nobody buzzed', () => {
+  // No clock to kill it and no host override — without an escape hatch the room
+  // would stop at the first question everyone sat out.
+  const s = makeSession({ settings: { timed: false }, playerIds: ['a', 'b'] });
+  for (const p of ['a', 'b']) {
+    assert.equal(clientView(getEntity('GameSession', s.id), { myPlayerId: p }).canAdvance, true);
+  }
+});
+
+// ── The question log ────────────────────────────────────────────────────────
+
+test('a question that dies unanswered is logged, at zero', () => {
+  const s = makeSession();
+  const cur = applyDead(s.id).session;
+  const entry = cur.question_results.at(-1);
+  assert.equal(entry.kind, 'dead');
+  assert.equal(entry.points, 0);
+  assert.equal(entry.question_index, 0);
+  assert.equal(entry.player, '', 'nobody answered it');
+});
+
+test('every client reporting a dead question logs it once', () => {
+  const s = makeSession();
+  applyDead(s.id);
+  applyDead(s.id);
+  applyDead(s.id);
+  assert.equal(getEntity('GameSession', s.id).question_results.length, 1);
+});
+
+test('a question that died on its wrong-answer limit is not logged twice', () => {
+  const s = makeSession({ playerIds: ['a', 'b'] });
+  answer(s.id, 'a', 'wrong');
+  answer(s.id, 'b', 'wrong');            // all_answered ⇒ dead
+  applyDead(s.id);                       // a client's timer fires afterwards
+  const results = getEntity('GameSession', s.id).question_results;
+  assert.equal(results.length, 2, 'the two wrong answers, and no extra dead row');
+  assert.equal(results.every(r => r.kind !== 'dead'), true);
+});
+
+test('a question the room stepped over still appears in the log', () => {
+  const s = makeSession();
+  const next = applyAdvance(s.id, { nextIndex: 1, currentType: 'TOSSUP' }).session;
+  const entry = next.question_results.at(-1);
+  assert.equal(entry.kind, 'dead');
+  assert.equal(entry.points, 0);
+  assert.equal(entry.question_index, 0);
+  // …and the one it moved onto is not logged until it too is played.
+  assert.equal(next.question_results.length, 1);
+});
+
+test('advancing past an answered question adds nothing', () => {
+  const s = makeSession();
+  answer(s.id, 'a', 'correct');
+  const next = applyAdvance(s.id, { nextIndex: 1, currentType: 'TOSSUP' }).session;
+  assert.equal(next.question_results.length, 1, 'just the correct answer');
+});
+
+// ── Pause ───────────────────────────────────────────────────────────────────
+
+test('pausing freezes the reading and resuming picks up where it stopped', async () => {
+  const s = makeSession();
+  const startedAt = getEntity('GameSession', s.id).buzz_state.reading_started_at;
+
+  applyPause(s.id, { paused: true });
+  const paused = getEntity('GameSession', s.id).buzz_state;
+  assert.ok(paused.paused_at, 'the instant it stopped is recorded');
+  assert.equal(paused.reading_started_at, startedAt, 'and the read is untouched while stopped');
+
+  await new Promise(r => setTimeout(r, 30));
+  applyPause(s.id, { paused: false });
+  const resumed = getEntity('GameSession', s.id).buzz_state;
+  assert.equal(resumed.paused_at, null);
+  // Every client derives its word from `now - reading_started_at`, so the start
+  // moves forward by the paused interval rather than the reading jumping ahead.
+  assert.ok(resumed.reading_started_at >= startedAt + 25,
+    `reading start did not absorb the pause (${resumed.reading_started_at - startedAt}ms)`);
+});
+
+test('pausing twice, or resuming an unpaused match, does nothing', () => {
+  const s = makeSession();
+  applyPause(s.id, { paused: true });
+  const first = getEntity('GameSession', s.id).buzz_state.paused_at;
+  assert.equal(applyPause(s.id, { paused: true }).patch, null);
+  assert.equal(getEntity('GameSession', s.id).buzz_state.paused_at, first);
+
+  applyPause(s.id, { paused: false });
+  assert.equal(applyPause(s.id, { paused: false }).patch, null);
+});
+
+test('a pause does not let the watchdog neg the player holding the buzz', async () => {
+  const s = makeSession();
+  buzz(s.id, { player: 'a', at: Date.now() });
+  applyPause(s.id, { paused: true });
+
+  // Long enough that the hold would be stale if the pause were not counted.
+  const later = Date.now() + STALE_BUZZ_MS + 5000;
+  assert.equal(applyStaleBuzzRelease(s.id, { now: later }).patch, null,
+    'a stopped match is not a frozen tab');
+  assert.equal(getEntity('GameSession', s.id).buzz_state.buzzed_player_id, 'a');
+
+  await new Promise(r => setTimeout(r, 30));
+  applyPause(s.id, { paused: false });
+  const bs = getEntity('GameSession', s.id).buzz_state;
+  assert.ok(bs.buzzed_at >= Date.now() - 5,
+    'the answer window resumes rather than having quietly run out during the pause');
+});
+
+test('a finished question cannot be paused', () => {
+  const s = makeSession();
+  answer(s.id, 'a', 'correct');
+  assert.equal(applyPause(s.id, { paused: true }).patch, null,
+    'a pause held across the advance would freeze the next question');
+});
+
+// ── Ending a marathon ───────────────────────────────────────────────────────
+//
+// A marathon has no last question, so it needs a way to be stopped — and the
+// obvious one, a host button, is the unilateral power the rest of the match
+// controls were deliberately stripped of. So the room agrees to it instead.
+
+const endRequest = (id, player) => applyEndRequest(id, {
+  playerId: player, displayName: player.toUpperCase(), currentType: 'TOSSUP',
+});
+const endVote = (id, player, accept) => applyEndVote(id, {
+  playerId: player, displayName: player.toUpperCase(), accept, currentType: 'TOSSUP',
+});
+
+test('a player alone in the room ends the marathon outright', () => {
+  const s = makeSession({ playerIds: ['a'] });
+  const cur = endRequest(s.id, 'a').session;
+  assert.equal(cur.status, 'finished', 'there is nobody to ask');
+  assert.equal(cur.end_vote, null);
+  // The question they were on is still a question that was played.
+  assert.equal(cur.question_results.at(-1).kind, 'dead');
+});
+
+test('with others in the room it asks rather than ends', () => {
+  const s = makeSession({ playerIds: ['a', 'b', 'c'] });
+  const cur = endRequest(s.id, 'a').session;
+  assert.equal(cur.status, 'active', 'the game does not stop on one player saying so');
+  assert.deepEqual(cur.end_vote.accepted, ['a'], 'asking is agreeing');
+  assert.equal(cur.end_vote.requested_by, 'a');
+});
+
+test('the marathon ends only once everyone has accepted', () => {
+  const s = makeSession({ playerIds: ['a', 'b', 'c'] });
+  endRequest(s.id, 'a');
+
+  const afterB = endVote(s.id, 'b', true).session;
+  assert.equal(afterB.status, 'active', 'C has not answered yet');
+  assert.deepEqual(afterB.end_vote.accepted, ['a', 'b']);
+
+  const afterC = endVote(s.id, 'c', true).session;
+  assert.equal(afterC.status, 'finished');
+  assert.equal(afterC.end_vote, null);
+});
+
+test('one decline keeps the game going', () => {
+  const s = makeSession({ playerIds: ['a', 'b', 'c'] });
+  endRequest(s.id, 'a');
+  endVote(s.id, 'b', true);
+  const declined = endVote(s.id, 'c', false).session;
+  assert.equal(declined.status, 'active');
+  assert.equal(declined.end_vote.declined_by, 'C', 'the room is told who, not left guessing');
+
+  // …and it can be dismissed by anyone, since it is over either way.
+  const cleared = applyEndVoteClear(s.id, { playerId: 'b' }).session;
+  assert.equal(cleared.end_vote, null);
+});
+
+test('accepting twice does not double-count, and asking twice keeps the tally', () => {
+  const s = makeSession({ playerIds: ['a', 'b', 'c'] });
+  endRequest(s.id, 'a');
+  endVote(s.id, 'b', true);
+  endVote(s.id, 'b', true);
+  assert.deepEqual(getEntity('GameSession', s.id).end_vote.accepted, ['a', 'b']);
+
+  endRequest(s.id, 'a');   // pressed again
+  assert.deepEqual(getEntity('GameSession', s.id).end_vote.accepted, ['a', 'b'],
+    'a second press must not wipe the accepts already in');
+});
+
+test('only the requester may withdraw, and a lapsed request clears for anyone', () => {
+  const s = makeSession({ playerIds: ['a', 'b'] });
+  endRequest(s.id, 'a');
+  assert.equal(applyEndVoteClear(s.id, { playerId: 'b' }).patch, null,
+    'B cannot silently cancel a live request — they decline it');
+  assert.equal(applyEndVoteClear(s.id, { playerId: 'a' }).session.end_vote, null);
+
+  // A request nobody answers has to go away on its own.
+  endRequest(s.id, 'a');
+  const live = getEntity('GameSession', s.id);
+  live.end_vote = { ...live.end_vote, requested_at: Date.now() - END_VOTE_MS - 1000 };
+  assert.equal(applyEndVoteClear(s.id, { playerId: 'b' }).session.end_vote, null,
+    'any client may report the lapse');
+});
+
+test('a request is not stranded by the player it was waiting on leaving', () => {
+  const s = makeSession({ playerIds: ['a', 'b', 'c'] });
+  endRequest(s.id, 'a');
+  endVote(s.id, 'b', true);
+
+  const live = getEntity('GameSession', s.id);
+  live.players = live.players.filter(p => p.user_id !== 'c');   // the hold-out leaves
+  const settled = resolveEndVoteAfterLeave(s.id);
+  assert.equal(settled.session.status, 'finished',
+    'everyone still here had agreed, so it ends rather than waiting on someone who has gone');
+});
+
+test('a request goes with the player who made it', () => {
+  const s = makeSession({ playerIds: ['a', 'b', 'c'] });
+  endRequest(s.id, 'a');
+  const live = getEntity('GameSession', s.id);
+  live.players = live.players.filter(p => p.user_id !== 'a');
+  const settled = resolveEndVoteAfterLeave(s.id);
+  assert.equal(settled.session.end_vote, null);
+  assert.equal(settled.session.status, 'active', 'the rest carry on');
+});
+
+test('starting a new game clears a request left over from the last one', () => {
+  const s = makeSession({ playerIds: ['a', 'b'] });
+  endRequest(s.id, 'a');
+  assert.equal(applyStart(s.id).session.end_vote, null);
+});
+
+// ── Reading position across a buzz ──────────────────────────────────────────
+
+test('a reopened tossup resumes from the word it was frozen on', async () => {
+  const s = makeSession();
+  const startedAt = getEntity('GameSession', s.id).buzz_state.reading_started_at;
+  buzz(s.id, { player: 'a', at: Date.now() });
+  await new Promise(r => setTimeout(r, 30));
+
+  // A gets it wrong, so the question reopens for everyone else.
+  const cur = answer(s.id, 'a', 'wrong');
+  assert.ok(cur.buzz_state.reading_started_at >= startedAt + 25,
+    'the time A spent holding the buzz is added to the reading start, so the ' +
+    'other teams pick up on the word it stopped at rather than several ahead');
 });
 
 test('every player answering wrong kills the question even under the limit', () => {

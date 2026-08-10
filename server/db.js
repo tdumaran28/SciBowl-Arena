@@ -78,6 +78,48 @@ export function newId() {
   return crypto.randomBytes(12).toString('hex');
 }
 
+// ── Change notification ─────────────────────────────────────────────────────
+//
+// The local store is authoritative for GameSession — a buzz claim has to be a
+// synchronous read-modify-write, which is why it never went to Supabase. But
+// "in this process's memory" also means "gone when the process stops", and on a
+// free tier the process stops constantly: a 15-minute idle spin-down or a
+// redeploy took every live room with it.
+//
+// So writes are announced here and server/sessionStore.js mirrors them to
+// Postgres write-behind. The mirror is a copy, never the source of truth — it
+// is read exactly once, at boot, to put the rooms back.
+
+const listeners = new Set();
+
+/** Subscribe to entity writes. Returns an unsubscribe function. */
+export function onEntityChange(fn) {
+  listeners.add(fn);
+  return () => listeners.delete(fn);
+}
+
+function emit(type, id, record) {
+  for (const fn of listeners) {
+    // A mirror that throws must not take down the write that triggered it.
+    try { fn(type, id, record); } catch { /* the mirror logs its own failures */ }
+  }
+}
+
+/**
+ * Insert a record without announcing it — used by the mirror when it puts
+ * rehydrated rooms back, so restoring state doesn't echo straight back out as
+ * a fresh write for every room.
+ */
+export function hydrateEntity(type, record) {
+  if (!record?.id) return null;
+  const records = db.entities[type] || (db.entities[type] = []);
+  const idx = records.findIndex(r => r.id === record.id);
+  if (idx === -1) records.push(record);
+  else records[idx] = record;
+  save();
+  return record;
+}
+
 // ── Entity helpers (Base44-compatible semantics) ────────────────────────────
 
 function applySort(records, sort) {
@@ -122,6 +164,7 @@ export function createEntity(type, data, createdBy = null) {
   };
   db.entities[type].push(record);
   save();
+  emit(type, record.id, record);
   return record;
 }
 
@@ -138,6 +181,7 @@ export function updateEntity(type, id, data) {
   if (idx === -1) return null;
   records[idx] = { ...records[idx], ...data, id, updated_date: new Date().toISOString() };
   save();
+  emit(type, id, records[idx]);
   return records[idx];
 }
 
@@ -147,6 +191,7 @@ export function deleteEntity(type, id) {
   if (idx === -1) return false;
   records.splice(idx, 1);
   save();
+  emit(type, id, null);
   return true;
 }
 

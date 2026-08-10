@@ -5,7 +5,10 @@ import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Users, Crown, Plus, LogIn } from 'lucide-react';
 
-export default function TeamPanel({ session, myPlayerId, onUpdateSession }) {
+// The room's whole roster, organised by team — there is no separate players
+// list any more, because a player who is not on a team cannot play: the match
+// will not start until every one of them has joined or made one.
+export default function TeamPanel({ session, myPlayerId, onUpdateSession, hostId = null }) {
   const [newTeamName, setNewTeamName] = useState('');
   const players = session?.players || [];
   const teams = session?.teams || [];
@@ -75,6 +78,9 @@ export default function TeamPanel({ session, myPlayerId, onUpdateSession }) {
                   </div>
                   <span className={p.user_id === myPlayerId ? 'font-semibold text-primary' : ''}>{p.display_name}</span>
                   {p.user_id === team.captain_id && <Crown className="w-3 h-3 text-amber-500" />}
+                  {p.user_id === hostId && (
+                    <Badge variant="outline" className="text-[10px] px-1 py-0">Host</Badge>
+                  )}
                 </div>
               ))}
               {playersOnTeam(team.name).length === 0 && (
@@ -85,14 +91,19 @@ export default function TeamPanel({ session, myPlayerId, onUpdateSession }) {
         ))}
 
         {unassigned.length > 0 && (
-          <div className="space-y-1">
-            <p className="text-xs text-muted-foreground font-medium">No Team</p>
+          <div className="space-y-1 rounded-lg border border-amber-500/30 bg-amber-500/5 p-2.5">
+            <p className="text-xs text-amber-700 dark:text-amber-400 font-medium">
+              Not playing yet — needs a team
+            </p>
             {unassigned.map(p => (
               <div key={p.user_id} className="flex items-center gap-1.5 text-xs px-1">
                 <div className="w-5 h-5 rounded-full bg-muted flex items-center justify-center text-xs font-bold text-muted-foreground">
                   {p.display_name?.[0]?.toUpperCase()}
                 </div>
                 <span className={p.user_id === myPlayerId ? 'font-semibold text-primary' : 'text-muted-foreground'}>{p.display_name}</span>
+                {p.user_id === hostId && (
+                  <Badge variant="outline" className="text-[10px] px-1 py-0">Host</Badge>
+                )}
               </div>
             ))}
           </div>

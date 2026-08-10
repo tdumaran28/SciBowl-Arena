@@ -20,6 +20,7 @@ export async function GET(request, { params }) {
   if (error) return error;
 
   try {
+    await store.ensureSessionsLoaded();
     const session = getEntity('GameSession', id);
     if (!session) return NextResponse.json({ message: 'Session not found' }, { status: 404 });
 

@@ -9,6 +9,7 @@ import next from 'next';
 import { WebSocketServer, WebSocket } from 'ws';
 import nextEnv from '@next/env'; // CJS module — no named ESM exports
 import { verifyToken } from '@clerk/backend';
+import { startKeepWarm } from './server/keepwarm.js';
 
 const dev = process.env.NODE_ENV !== 'production';
 nextEnv.loadEnvConfig(process.cwd(), dev);
@@ -115,6 +116,12 @@ globalThis.__scibowlBroadcast = (frame) => {
     ws.send(msg);
   }
 };
+
+// Keep a free-tier instance from spinning down out from under a live match.
+// Off unless KEEP_WARM_URL / RENDER_EXTERNAL_URL is set — see server/keepwarm.js.
+// "Active" means at least one player has a realtime socket open, which is true
+// for everyone sitting in a room or playing.
+startKeepWarm({ isActive: () => wss.clients.size > 0 });
 
 server.listen(PORT, () => {
   console.log(`SciBowl Arena (Next.js) listening on http://localhost:${PORT}`);

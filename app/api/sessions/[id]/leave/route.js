@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { requireUser, errorResponse } from '@server/auth';
 import { getEntity, updateEntity } from '@server/db';
+import { ensureSessionsLoaded } from '@server/store';
+import { resolveEndVoteAfterLeave } from '@server/match';
 import { broadcastPatch } from '@server/realtime';
 
 // Leaving a room, applied server-side so it works from `navigator.sendBeacon`
@@ -20,6 +22,7 @@ export async function POST(request, { params }) {
   if (error) return error;
 
   try {
+    await ensureSessionsLoaded();
     const session = getEntity('GameSession', id);
     if (!session) return NextResponse.json({ message: 'Session not found' }, { status: 404 });
 
@@ -40,8 +43,18 @@ export async function POST(request, { params }) {
     if (session.host_id === player_id && players.length > 0) {
       patch.host_id = players[0].user_id;
     }
-    const updated = updateEntity('GameSession', id, patch);
+    let updated = updateEntity('GameSession', id, patch);
     broadcastPatch('GameSession', id, patch);
+
+    // A standing "end the marathon?" request may have been waiting on exactly
+    // the player who just left — either as the one hold-out, or as the person
+    // who asked. Re-checking here is what stops the room being left looking at
+    // a prompt that can never resolve.
+    const settled = resolveEndVoteAfterLeave(id);
+    if (settled?.patch) {
+      updated = settled.session;
+      broadcastPatch('GameSession', id, settled.patch);
+    }
     return NextResponse.json(updated);
   } catch (err) {
     return errorResponse(err);

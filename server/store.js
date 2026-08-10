@@ -4,6 +4,12 @@
 // local JSON store.
 import * as local from './db.js';
 import * as sb from './supabase.js';
+// Imported for its side effect: subscribing to GameSession writes so live
+// rooms are mirrored to Postgres and survive a restart or an idle spin-down.
+// Re-exported so the session routes can await the one-time restore.
+import { ensureSessionsLoaded } from './sessionStore.js';
+
+export { ensureSessionsLoaded };
 
 const useSupabase = (type) => sb.enabled && type in sb.TABLES;
 

@@ -188,8 +188,29 @@ create index if not exists leaderboard_entries_score_idx
 create index if not exists leaderboard_entries_created_idx
   on public.leaderboard_entries (created_date desc);
 
+-- Live multiplayer rooms.
+--
+-- This is a MIRROR, not the store. A match is played out of the server's own
+-- memory (a buzz claim has to be a synchronous read-modify-write), and this
+-- table is written behind it and read exactly once, at boot — so a redeploy or
+-- an idle spin-down puts the rooms back instead of ending every game. See
+-- server/sessionStore.js. Rows older than a week are dropped on startup.
+create table if not exists public.game_sessions (
+  id text primary key,
+  created_date timestamptz not null default now(),
+  updated_date timestamptz not null default now(),
+  created_by text,
+  data jsonb not null default '{}'::jsonb
+);
+
+create index if not exists game_sessions_updated_idx
+  on public.game_sessions (updated_date desc);
+create index if not exists game_sessions_room_code_idx
+  on public.game_sessions ((data->>'room_code'));
+
 -- Lock the tables down for anon/authenticated clients (service role bypasses RLS).
 alter table public.app_users enable row level security;
+alter table public.game_sessions enable row level security;
 alter table public.rounds enable row level security;
 alter table public.help_content enable row level security;
 alter table public.user_stats enable row level security;

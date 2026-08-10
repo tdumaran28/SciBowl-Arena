@@ -189,13 +189,38 @@ export const base44 = {
     // Question transitions — the server stamps the reading clock.
     start: (sessionId) =>
       request(`/api/sessions/${sessionId}/advance`, { method: 'POST', body: { action: 'start' } }),
-    next: (sessionId, { next_index, keep_bonus_owner = false, finished = false }) =>
+    next: (sessionId, { next_index, keep_bonus_owner = false, finished = false, current_type = '' }) =>
       request(`/api/sessions/${sessionId}/advance`, {
-        method: 'POST', body: { action: 'next', next_index, keep_bonus_owner, finished },
+        method: 'POST',
+        // current_type is the type of the question being LEFT — the server has
+        // no question list, and needs it to log one the room never answered.
+        body: { action: 'next', next_index, keep_bonus_owner, finished, current_type },
       }),
     dead: (sessionId, { is_bonus = false } = {}) =>
       request(`/api/sessions/${sessionId}/advance`, {
         method: 'POST', body: { action: 'dead', is_bonus },
+      }),
+    // Freeze the reading for the whole room. Host only, enforced server-side —
+    // a local pause would stop this player's words while everyone else's ran on.
+    pause: (sessionId, { paused }) =>
+      request(`/api/sessions/${sessionId}/advance`, {
+        method: 'POST', body: { action: 'pause', paused },
+      }),
+    // Ending a marathon early. Alone in the room this ends it outright;
+    // otherwise it asks everyone else, and they all have to agree.
+    requestEnd: (sessionId, { current_type = '' } = {}) =>
+      request(`/api/sessions/${sessionId}/advance`, {
+        method: 'POST', body: { action: 'end_request', current_type },
+      }),
+    voteEnd: (sessionId, { accept, current_type = '' }) =>
+      request(`/api/sessions/${sessionId}/advance`, {
+        method: 'POST', body: { action: 'end_vote', accept, current_type },
+      }),
+    // Withdraw a request, or clear one that has lapsed — guarded server-side,
+    // so any client may report the lapse.
+    clearEndRequest: (sessionId) =>
+      request(`/api/sessions/${sessionId}/advance`, {
+        method: 'POST', body: { action: 'end_clear' },
       }),
     // Release a buzz nobody ever answered (the holder's tab froze or went
     // away). Guarded server-side, so any client may report it.

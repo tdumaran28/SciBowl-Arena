@@ -17,6 +17,7 @@
 // see ARBITRATION_WINDOW_MS.
 
 import { getEntity, updateEntity } from './db.js';
+import { questionClosed } from './match.js';
 import { broadcastPatch } from './realtime.js';
 
 export const ARBITRATION_WINDOW_MS = 150;
@@ -58,14 +59,28 @@ function finishWindow(sessionId) {
     const bs = session.buzz_state || {};
     // Re-check under the same synchronous critical section the claims were
     // validated in: the question may have resolved while the window was open.
-    if (!bs.buzzed_player_id && !bs.result && !bs.dead) {
+    //
+    // `questionClosed` and not `!bs.result`, which is the same rule the route
+    // itself applies. After a wrong answer a tossup carries the loser's result
+    // while it is still live for the other teams, so testing for any result at
+    // all rejected the very buzz the reopen exists to allow: the next team
+    // pressed the buzzer, got a 409, and watched their answer box disappear.
+    if (!bs.buzzed_player_id && !questionClosed(bs)) {
       const buzz_state = {
         ...bs,
         buzzed_player_id: winner.playerId,
         buzzed_team: winner.team || '',
         buzzed_display_name: winner.displayName,
         buzzed_at: winner.buzzedAt,
+        // The previous team's miss stops being the room's headline the moment
+        // someone else takes the question — and leaving it set would read as
+        // "resolved" to every client that asks whether a buzz is live.
         result: null,
+        result_player: null,
+        result_player_id: null,
+        result_team: null,
+        result_points: null,
+        result_interrupted: false,
         // The provisional lock is now superseded by the arbitrated one.
         pending_buzz: null,
         negged_teams: bs.negged_teams || [],

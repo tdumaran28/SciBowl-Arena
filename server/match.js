@@ -36,6 +36,84 @@ export function wrongLimitFor(format) {
   return DEAD_AFTER_WRONG[format] ?? DEAD_AFTER_WRONG.DEFAULT;
 }
 
+/**
+ * Is this question over for everybody?
+ *
+ * Not the same as "has a result": a WRONG tossup answer leaves the question
+ * live for the other teams, so the result fields are populated while the buzzer
+ * is still open. Anything deciding whether a new buzz may be taken has to ask
+ * this rather than `!!result` — reading a neg as "closed" is what stopped the
+ * other team from buzzing after one (server/buzz.js).
+ *
+ * A bonus is closed by any result, since nobody else was going to get it.
+ */
+export function questionClosed(bs) {
+  return !!bs?.dead || bs?.result === 'correct' || !!bs?.bonus_answered_by;
+}
+
+/**
+ * Reading is frozen for the whole room while a buzz is held. When the question
+ * reopens (the buzzer was wrong, or never answered), the words have to carry on
+ * from where they stopped — but every client derives its position from
+ * `now - reading_started_at`, so a start time left alone means the reading
+ * silently jumps forward by however long the buzzer spent typing.
+ *
+ * Pushing the start time forward by the frozen interval keeps that one formula
+ * correct for everyone, with no separate "paused for" state to keep in step.
+ */
+function readingResumedAt(bs, frozenSince) {
+  const start = bs?.reading_started_at || null;
+  if (!start || !frozenSince) return start;
+  const frozenFor = Date.now() - frozenSince;
+  return frozenFor > 0 ? start + frozenFor : start;
+}
+
+/**
+ * A question that ended with nobody scoring on it — the clock ran out, or the
+ * room stepped over it. It is worth zero either way, but leaving it out of the
+ * log made it vanish from the match: the question numbering jumped and there
+ * was nothing to click to read it back.
+ */
+function unansweredLogEntry(questionIndex, type) {
+  return {
+    question_index: questionIndex,
+    player: '',
+    team: '',
+    kind: 'dead',
+    points: 0,
+    type: type || 'TOSSUP',
+    interrupted: false,
+    submitted_answer: null,
+    submitted_choice: null,
+    ts: new Date().toISOString(),
+  };
+}
+
+/** Has anything already been logged against this question? */
+function isLogged(session, questionIndex) {
+  return (session?.question_results || []).some(r => r.question_index === questionIndex);
+}
+
+/**
+ * Has everyone still in the room already missed this question?
+ *
+ * Asked of the players who are HERE, not of the `teams` array: a team keeps its
+ * row after its last player leaves, so counting rows left a question "still
+ * live for Blue" when Blue had gone home. Nobody could buzz it and — now that
+ * advancing is not a host power — nobody could move past it either.
+ *
+ * Per player rather than per team, so a free-for-all room and a room with
+ * unassigned players are covered by the same rule. Mirrors `roomExhausted` in
+ * src/utils/matchRules.js.
+ */
+function roomExhausted(session, { neggedTeams = [], neggedPlayers = [] }) {
+  const players = session?.players || [];
+  if (players.length === 0) return false;
+  return !players.some(p => (
+    p.team ? !neggedTeams.includes(p.team) : !neggedPlayers.includes(p.user_id)
+  ));
+}
+
 function pointsFor({ result, type, interrupted, powers }) {
   const correct = result === 'correct';
   if (correct && type === 'BONUS') return SCORING.BONUS_CORRECT;
@@ -80,6 +158,11 @@ export function applyAnswer(sessionId, {
   if (bs.dead || (isBonus ? !!bs.result : bs.result === 'correct')) {
     return { session, patch: null, rejected: 'this question is already resolved' };
   }
+
+  // Where the reading was frozen, if it was: the buzz instant for a buzzed
+  // tossup, the host's pause otherwise. Used below to carry the reading on from
+  // that word when the question reopens.
+  const frozenSince = bs.paused_at || bs.buzzed_at || null;
 
   // A bonus belongs to the team (free-for-all: the player) that won the tossup.
   // Enforced here and not only in the UI, since the UI merely hides the box.
@@ -161,11 +244,10 @@ export function applyAnswer(sessionId, {
     // answers) and doesn't miscount a player who somehow answers twice.
     const wrong_count = (bs.wrong_count || 0) + 1;
     const wrongLimit = wrongLimitFor(questionFormat || bs.question_format);
-    const rosterExhausted = (session.teams || []).length > 0
-      ? (session.teams || []).every(t => negged_teams.includes(t.name))
-      : (session.players || []).length > 0 &&
-        (session.players || []).every(p => negged_players.includes(p.user_id));
-    const dead = wrong_count >= wrongLimit || rosterExhausted;
+    const exhausted = roomExhausted(session, {
+      neggedTeams: negged_teams, neggedPlayers: negged_players,
+    });
+    const dead = wrong_count >= wrongLimit || exhausted;
 
     buzz_state = {
       buzzed_player_id: null, buzzed_team: null, buzzed_display_name: null,
@@ -178,7 +260,11 @@ export function applyAnswer(sessionId, {
       wrong_count,
       wrong_limit: wrongLimit,
       question_format: questionFormat || bs.question_format || '',
-      reading_started_at: bs.reading_started_at || null,
+      // The question reopens for the other teams, so the reading resumes from
+      // the word it was frozen on rather than jumping forward by however long
+      // this player held the buzz.
+      reading_started_at: readingResumedAt(bs, frozenSince),
+      paused_at: null,
       // Nobody can win it any more: no bonus is awarded and the room moves on.
       dead,
       dead_reason: dead
@@ -218,6 +304,12 @@ export function applyStaleBuzzRelease(sessionId, {
   if (!session) return null;
   const bs = session.buzz_state || {};
   if (!bs.buzzed_player_id || bs.result || bs.dead) return { session, patch: null };
+  // A stopped match is not a frozen tab. While the host has it paused the hold
+  // cannot go stale, however long it lasts — releasing here would score a neg
+  // against a player for a pause they did not ask for. `applyPause` moves
+  // `buzzed_at` forward on resume, so the window carries on rather than
+  // restarting or having quietly expired.
+  if (bs.paused_at) return { session, patch: null };
   const heldSince = bs.buzzed_at || bs.reading_started_at || 0;
   if (heldSince && now - heldSince < staleMs) return { session, patch: null };
 
@@ -239,11 +331,9 @@ export function applyDead(sessionId, { isBonus = false } = {}) {
   const bs = session.buzz_state || {};
   if (bs.result === 'correct' || bs.dead) return { session, patch: null };
 
-  const teams = session.teams || [];
-  const allAnswered = teams.length > 0
-    ? teams.every(t => (bs.negged_teams || []).includes(t.name))
-    : (session.players || []).length > 0 &&
-      (session.players || []).every(p => (bs.negged_players || []).includes(p.user_id));
+  const allAnswered = roomExhausted(session, {
+    neggedTeams: bs.negged_teams || [], neggedPlayers: bs.negged_players || [],
+  });
 
   const patch = {
     buzz_state: {
@@ -252,6 +342,7 @@ export function applyDead(sessionId, { isBonus = false } = {}) {
       buzzed_team: null,
       buzzed_display_name: null,
       pending_buzz: null,
+      paused_at: null,
       // A timed-out bonus resolves as wrong: bonuses have no reopen semantics,
       // and without a result the match could never advance past it.
       result: (allAnswered || isBonus) ? 'wrong' : null,
@@ -259,6 +350,22 @@ export function applyDead(sessionId, { isBonus = false } = {}) {
       dead_reason: allAnswered ? 'all_answered' : 'timeout',
     },
   };
+
+  // A question nobody ever answered still happened, so it belongs in the
+  // question log with a zero against it — otherwise the log skips a number and
+  // there is nothing to click to read the question back. Only when nothing is
+  // logged for it already: a tossup that died on its wrong-answer limit has
+  // every one of those answers recorded, and a second "dead" row would double
+  // it up. Every client reports a dead question, so this must be idempotent —
+  // the early return above is what makes it so.
+  const index = session.current_question_index || 0;
+  if (!isLogged(session, index)) {
+    patch.question_results = [
+      ...(session.question_results || []),
+      unansweredLogEntry(index, isBonus ? 'BONUS' : 'TOSSUP'),
+    ];
+  }
+
   return { session: updateEntity('GameSession', sessionId, patch), patch };
 }
 
@@ -267,13 +374,25 @@ export function applyDead(sessionId, { isBonus = false } = {}) {
  * client knows the filtered question list), but the timestamp is stamped here
  * so every client derives its reading position from the same clock.
  */
-export function applyAdvance(sessionId, { nextIndex, keepBonusOwner = false, finished = false }) {
+export function applyAdvance(sessionId, {
+  nextIndex, keepBonusOwner = false, finished = false, currentType = '',
+}) {
   const session = getEntity('GameSession', sessionId);
   if (!session) return null;
   const bs = session.buzz_state || {};
 
+  // The question being left behind, if it was played and never logged — one
+  // that timed out on a client that dropped before reporting, say. Worth zero,
+  // like any question nobody answered, but it has to appear: a log that omits
+  // it reads as though the room jumped a question.
+  const leavingIndex = session.current_question_index || 0;
+  const logLeftBehind = bs.reading_started_at && !isLogged(session, leavingIndex)
+    ? [...(session.question_results || []), unansweredLogEntry(leavingIndex, currentType)]
+    : null;
+
   if (finished) {
-    const patch = { status: 'finished', buzz_state: null };
+    const patch = { status: 'finished', buzz_state: null, end_vote: null };
+    if (logLeftBehind) patch.question_results = logLeftBehind;
     return { session: updateEntity('GameSession', sessionId, patch), patch };
   }
 
@@ -290,6 +409,48 @@ export function applyAdvance(sessionId, { nextIndex, keepBonusOwner = false, fin
     : { reading_started_at: Date.now() };
 
   const patch = { current_question_index: nextIndex, buzz_state };
+  if (logLeftBehind) patch.question_results = logLeftBehind;
+  return { session: updateEntity('GameSession', sessionId, patch), patch };
+}
+
+/**
+ * Pause or resume the reading for the whole room (host only — enforced in the
+ * route). A pause has to be shared: a local one would only stop this player's
+ * words while everyone else's carried on, and the buzzer stayed live.
+ *
+ * Resuming shifts `reading_started_at` forward by the paused interval rather
+ * than storing an accumulated total, so the one formula every client derives
+ * its word position from — `now - reading_started_at` — stays correct with
+ * nothing extra to keep in step.
+ */
+export function applyPause(sessionId, { paused }) {
+  const session = getEntity('GameSession', sessionId);
+  if (!session) return null;
+  const bs = session.buzz_state || {};
+  // Nothing to pause once the question is over, and a pause held across the
+  // advance would freeze the next one.
+  if (questionClosed(bs)) return { session, patch: null };
+
+  if (paused) {
+    if (bs.paused_at) return { session, patch: null };
+    const patch = { buzz_state: { ...bs, paused_at: Date.now() } };
+    return { session: updateEntity('GameSession', sessionId, patch), patch };
+  }
+
+  if (!bs.paused_at) return { session, patch: null };
+  const pausedFor = Math.max(0, Date.now() - bs.paused_at);
+  const patch = {
+    buzz_state: {
+      ...bs,
+      paused_at: null,
+      reading_started_at: readingResumedAt(bs, bs.paused_at),
+      // A buzz held across the pause has to have its clock moved on too, or the
+      // player who buzzed comes back with less time to answer than they had —
+      // and if the pause ran past STALE_BUZZ_MS, the watchdog would neg them
+      // for the interruption the moment play resumed.
+      buzzed_at: bs.buzzed_at ? bs.buzzed_at + pausedFor : bs.buzzed_at,
+    },
+  };
   return { session: updateEntity('GameSession', sessionId, patch), patch };
 }
 
@@ -301,8 +462,155 @@ export function applyStart(sessionId) {
     status: 'active',
     current_question_index: 0,
     buzz_state: { reading_started_at: Date.now() },
+    // A request left over from the previous game would be standing over this one.
+    end_vote: null,
   };
   return { session: updateEntity('GameSession', sessionId, patch), patch };
+}
+
+// ── Ending a marathon ───────────────────────────────────────────────────────
+//
+// A round of practice ends when the packet does. A marathon doesn't end at all
+// — it draws question k from (seed, k) forever — so it needs a way to be
+// stopped, and that used to be a host button. Handing one player the power to
+// end everyone else's game is the thing that was wrong with it, so this is a
+// request the room agrees to instead:
+//
+//   • alone in the room, there is nobody to ask — it just ends;
+//   • otherwise every other player has to accept, and a single decline drops
+//     it. Unanimous rather than a majority because the cost of a "no" is only
+//     that the game carries on, which is what everyone signed up for.
+//
+// The requester counts as having accepted, so "resolved" is one condition —
+// everyone on the roster has accepted — which also means a hold-out who leaves
+// releases the vote instead of stranding it.
+
+/** How long a request stands before it lapses. */
+export const END_VOTE_MS = 60_000;
+
+function endVoteExpired(vote, now = Date.now()) {
+  return !!vote && now - (vote.requested_at || 0) >= END_VOTE_MS;
+}
+
+/** Has everyone still in the room accepted? */
+function endVoteAgreed(session, vote) {
+  const roster = (session.players || []).map(p => p.user_id);
+  if (roster.length === 0) return true;
+  return roster.every(id => (vote.accepted || []).includes(id));
+}
+
+function finishMatch(sessionId, session, currentType) {
+  const patch = { status: 'finished', buzz_state: null, end_vote: null };
+  const leavingIndex = session.current_question_index || 0;
+  if (session.buzz_state?.reading_started_at && !isLogged(session, leavingIndex)) {
+    patch.question_results = [
+      ...(session.question_results || []),
+      unansweredLogEntry(leavingIndex, currentType),
+    ];
+  }
+  return { session: updateEntity('GameSession', sessionId, patch), patch };
+}
+
+/**
+ * Ask the room to end the marathon — or just end it, when there is nobody else
+ * left to ask.
+ */
+export function applyEndRequest(sessionId, { playerId, displayName, currentType = '' }) {
+  const session = getEntity('GameSession', sessionId);
+  if (!session) return null;
+  if (session.status !== 'active') return { session, patch: null };
+
+  const roster = session.players || [];
+  const others = roster.filter(p => p.user_id !== playerId);
+  if (others.length === 0) return finishMatch(sessionId, session, currentType);
+
+  // A request already standing is left alone, so pressing the button twice
+  // doesn't wipe the accepts that have come in.
+  const live = session.end_vote;
+  if (live && !endVoteExpired(live)) return { session, patch: null };
+
+  const patch = {
+    end_vote: {
+      requested_by: playerId,
+      requested_by_name: displayName || 'A player',
+      requested_at: Date.now(),
+      // Asking is agreeing — which makes "everyone has accepted" the single
+      // condition that ends it, however the roster changes underneath.
+      accepted: [playerId],
+      declined_by: null,
+    },
+  };
+  return { session: updateEntity('GameSession', sessionId, patch), patch };
+}
+
+/** Accept or decline a standing request. */
+export function applyEndVote(sessionId, { playerId, displayName, accept, currentType = '' }) {
+  const session = getEntity('GameSession', sessionId);
+  if (!session) return null;
+  const vote = session.end_vote;
+  if (!vote || session.status !== 'active') return { session, patch: null };
+  if (endVoteExpired(vote)) {
+    const patch = { end_vote: null };
+    return { session: updateEntity('GameSession', sessionId, patch), patch };
+  }
+
+  if (!accept) {
+    // One "no" is enough: the alternative is playing on, which is nobody's
+    // loss. Named so the room can see who, rather than the request simply
+    // evaporating.
+    const patch = {
+      end_vote: {
+        ...vote,
+        declined_by: displayName || 'A player',
+        declined_at: Date.now(),
+      },
+    };
+    return { session: updateEntity('GameSession', sessionId, patch), patch };
+  }
+
+  const accepted = vote.accepted?.includes(playerId)
+    ? vote.accepted
+    : [...(vote.accepted || []), playerId];
+  const next = { ...vote, accepted };
+  if (endVoteAgreed(session, next)) return finishMatch(sessionId, session, currentType);
+
+  const patch = { end_vote: next };
+  return { session: updateEntity('GameSession', sessionId, patch), patch };
+}
+
+/**
+ * Withdraw a request, or clear one that has lapsed. Any client may report the
+ * lapse — the timestamp is checked here, so a report that races an accept does
+ * nothing (the same shape as applyStaleBuzzRelease).
+ */
+export function applyEndVoteClear(sessionId, { playerId = null, force = false } = {}) {
+  const session = getEntity('GameSession', sessionId);
+  if (!session) return null;
+  const vote = session.end_vote;
+  if (!vote) return { session, patch: null };
+  const mine = playerId && vote.requested_by === playerId;
+  const done = !!vote.declined_by;
+  if (!force && !mine && !done && !endVoteExpired(vote)) return { session, patch: null };
+  const patch = { end_vote: null };
+  return { session: updateEntity('GameSession', sessionId, patch), patch };
+}
+
+/**
+ * Re-check a standing request after the roster changed. The player everyone was
+ * waiting on may have just left, and a vote that can never complete would keep
+ * the room looking at a prompt nobody can resolve.
+ */
+export function resolveEndVoteAfterLeave(sessionId) {
+  const session = getEntity('GameSession', sessionId);
+  const vote = session?.end_vote;
+  if (!session || !vote || session.status !== 'active') return null;
+  if (endVoteExpired(vote)) return applyEndVoteClear(sessionId, { force: true });
+  // The requester left: their request goes with them.
+  if (!(session.players || []).some(p => p.user_id === vote.requested_by)) {
+    return applyEndVoteClear(sessionId, { force: true });
+  }
+  if (endVoteAgreed(session, vote)) return finishMatch(sessionId, session, '');
+  return null;
 }
 
 /**
@@ -317,6 +625,7 @@ export function applyReturnToLobby(sessionId, { roundId = '', gameType = null, r
     round_id: roundId,
     current_question_index: 0,
     buzz_state: null,
+    end_vote: null,
     question_results: [],
     players: (session.players || []).map(p => (resetScores ? { ...p, score: 0, answers: [] } : p)),
     teams: (session.teams || []).map(t => (resetScores ? { ...t, score: 0 } : t)),

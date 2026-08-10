@@ -17,7 +17,7 @@ process.chdir(tmp);
 
 const { createEntity, getEntity } = await import('./db.js');
 const { claimBuzz, cancelWindow, ARBITRATION_WINDOW_MS } = await import('./buzz.js');
-const { applyDead } = await import('./match.js');
+const { applyDead, applyAnswer } = await import('./match.js');
 
 // Capture what would go out over the WebSocket (server.js installs the real one).
 const frames = [];
@@ -83,6 +83,48 @@ test('a question that resolves mid-window awards nobody', async () => {
   assert.equal(getEntity('GameSession', s.id).buzz_state.buzzed_player_id, null);
   assert.equal(getEntity('GameSession', s.id).buzz_state.pending_buzz, null,
     'and the provisional lock is cleared rather than left on screen');
+});
+
+// A tossup someone gets WRONG is not over — it reopens for the other teams. But
+// the wrong answer leaves its result on the buzz state while it does, and both
+// the window and the route used to read "has a result" as "is finished". The
+// next team pressed the buzzer, the claim was rejected, and their answer box
+// vanished a moment after it appeared.
+test('the next team may buzz after a neg, and the window awards it', async () => {
+  const s = makeSession();
+  // A buzzes, interrupts, and gets it wrong.
+  await claimBuzz(s.id, { playerId: 'a', team: '', displayName: 'A', buzzedAt: Date.now() });
+  applyAnswer(s.id, {
+    playerId: 'a', displayName: 'A', team: '', result: 'interrupt_wrong',
+    type: 'TOSSUP', interrupted: true, questionFormat: 'Short Answer',
+  });
+  const afterNeg = getEntity('GameSession', s.id).buzz_state;
+  assert.equal(afterNeg.result, 'neg', 'the neg is on the record…');
+  assert.equal(afterNeg.dead, false, '…but the question is still live');
+
+  const outcome = await claimBuzz(s.id, {
+    playerId: 'b', team: '', displayName: 'B', buzzedAt: Date.now(),
+  });
+  assert.equal(outcome.winnerId, 'b', 'B must actually be given the buzz');
+
+  const bs = getEntity('GameSession', s.id).buzz_state;
+  assert.equal(bs.buzzed_player_id, 'b');
+  assert.equal(bs.result, null,
+    'the previous team’s miss is cleared, or every client reads the question as resolved');
+  assert.equal(bs.negged_players.includes('a'), true, 'A stays locked out');
+});
+
+test('a buzz is refused once the question really is over', async () => {
+  const s = makeSession();
+  await claimBuzz(s.id, { playerId: 'a', team: '', displayName: 'A', buzzedAt: Date.now() });
+  applyAnswer(s.id, {
+    playerId: 'a', displayName: 'A', team: '', result: 'correct', type: 'TOSSUP',
+  });
+  const outcome = await claimBuzz(s.id, {
+    playerId: 'b', team: '', displayName: 'B', buzzedAt: Date.now(),
+  });
+  assert.equal(outcome.winnerId, null);
+  assert.equal(getEntity('GameSession', s.id).buzz_state.result, 'correct');
 });
 
 test('a buzz stamped before the question began is clamped, not trusted', async () => {
