@@ -1,19 +1,6 @@
 import { ClerkProvider } from '@clerk/nextjs';
-import { Inter, JetBrains_Mono } from 'next/font/google';
 import Providers from './providers';
 import '@/index.css';
-
-const inter = Inter({
-  subsets: ['latin'],
-  display: 'swap',
-  variable: '--font-inter',
-});
-
-const jetBrainsMono = JetBrains_Mono({
-  subsets: ['latin'],
-  display: 'swap',
-  variable: '--font-jetbrains-mono',
-});
 
 // The tab icon comes from the file convention: app/icon.png. Next hashes and
 // serves it automatically — don't add an `icons` field here, it would override
@@ -56,7 +43,7 @@ export default function RootLayout({ children }) {
 
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className={`${inter.variable} ${jetBrainsMono.variable} font-inter`}>
+      <body className="font-inter">
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
         {clerkConfigured ? (
           <ClerkProvider afterSignOutUrl="/login">

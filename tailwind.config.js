@@ -7,8 +7,8 @@ export default {
   theme: {
   	extend: {
       fontFamily: {
-        inter: ['var(--font-inter)', 'Inter', 'sans-serif'],
-        mono: ['var(--font-jetbrains-mono)', 'JetBrains Mono', 'monospace'],
+        inter: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
       },
   		borderRadius: {
   			lg: 'var(--radius)',
