@@ -123,14 +123,14 @@ export default function Layout({ children }) {
   );
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen bg-gradient-to-br from-background via-background to-muted/30">
       {/* Desktop sidebar */}
       <aside className="hidden lg:block fixed inset-y-0 left-0 w-60 z-30">
         {sidebar}
       </aside>
 
       {/* Mobile header */}
-      <header className="lg:hidden sticky top-0 z-40 h-14 bg-card border-b border-border flex items-center gap-3 px-4">
+      <header className="lg:hidden sticky top-0 z-40 h-14 bg-card/95 backdrop-blur border-b border-border flex items-center gap-3 px-4">
         <Button variant="ghost" size="icon" onClick={() => setMobileOpen(true)}>
           <Menu className="w-5 h-5" />
         </Button>
@@ -159,7 +159,7 @@ export default function Layout({ children }) {
       )}
 
       {/* Main content */}
-      <main className="lg:pl-60">
+      <main className="lg:pl-60 min-h-screen">
         {children}
       </main>
     </div>

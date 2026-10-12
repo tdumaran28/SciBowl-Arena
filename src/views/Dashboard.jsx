@@ -32,16 +32,16 @@ export default function Dashboard() {
   const stats = [
     { icon: BookOpen, label: 'Packets', value: summary?.rounds ?? '—', color: 'text-primary', bg: 'bg-primary/10' },
     { icon: Zap, label: 'Questions', value: summary?.questions ?? '—', color: 'text-accent', bg: 'bg-accent/10' },
-    { icon: Trophy, label: 'Games Played', value: summary?.games_played ?? '—', color: 'text-amber-500', bg: 'bg-amber-500/10' },
-    { icon: Target, label: 'Questions Answered', value: summary?.questions_answered ?? '—', color: 'text-emerald-500', bg: 'bg-emerald-500/10' },
-    { icon: Atom, label: 'Tournaments', value: summary?.tournaments ?? '—', color: 'text-purple-500', bg: 'bg-purple-500/10' },
-    { icon: UserRound, label: 'Players', value: summary?.players ?? '—', color: 'text-rose-500', bg: 'bg-rose-500/10' },
+    { icon: Trophy, label: 'Games Played', value: summary?.games_played ?? '—', color: 'text-warning', bg: 'bg-warning/10' },
+    { icon: Target, label: 'Questions Answered', value: summary?.questions_answered ?? '—', color: 'text-success', bg: 'bg-success/10' },
+    { icon: Atom, label: 'Tournaments', value: summary?.tournaments ?? '—', color: 'text-primary', bg: 'bg-primary/10' },
+    { icon: UserRound, label: 'Players', value: summary?.players ?? '—', color: 'text-accent', bg: 'bg-accent/10' },
   ];
 
   return (
-    <div className="p-6 lg:p-8 max-w-7xl mx-auto">
+    <div className="p-6 lg:p-8 max-w-7xl mx-auto space-y-8">
       {/* Hero */}
-      <motion.div variants={container} initial="hidden" animate="show" className="mb-8">
+      <motion.div variants={container} initial="hidden" animate="show">
         <motion.div variants={item} className="mb-2">
           <span className="text-sm font-medium text-muted-foreground uppercase tracking-widest">Welcome to</span>
         </motion.div>
@@ -54,16 +54,16 @@ export default function Dashboard() {
       </motion.div>
 
       {/* Quick actions */}
-      <motion.div variants={container} initial="hidden" animate="show" className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+      <motion.div variants={container} initial="hidden" animate="show" className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {[
           { to: '/database', icon: BookOpen, label: 'Browse Rounds', sub: `${summary?.playable_rounds ?? '…'} available`, color: 'bg-primary/10 text-primary' },
           { to: '/play', icon: Play, label: 'Solo Practice', sub: 'A round, or an endless marathon', color: 'bg-accent/10 text-accent' },
-          { to: '/multiplayer', icon: Users, label: 'Multiplayer', sub: 'Compete with others', color: 'bg-emerald-500/10 text-emerald-600' },
-          { to: '/pdf', icon: FileText, label: 'PDF Viewer', sub: 'Read packets side by side', color: 'bg-orange-500/10 text-orange-600' },
+          { to: '/multiplayer', icon: Users, label: 'Multiplayer', sub: 'Compete with others', color: 'bg-success/10 text-success' },
+          { to: '/pdf', icon: FileText, label: 'PDF Viewer', sub: 'Read packets side by side', color: 'bg-warning/10 text-warning' },
         ].map(({ to, icon: Icon, label, sub, color }) => (
           <motion.div key={to} variants={item}>
             <Link href={to}>
-              <Card className="group hover:shadow-md transition-all duration-200 hover:-translate-y-0.5 cursor-pointer border-border/60">
+              <Card className="group hover:shadow-md transition-all duration-200 hover:-translate-y-0.5 cursor-pointer border-border/60 bg-card/80 backdrop-blur-sm">
                 <CardContent className="p-5 flex items-center gap-4">
                   <div className={`w-11 h-11 rounded-xl flex items-center justify-center ${color}`}>
                     <Icon className="w-5 h-5" />
@@ -81,13 +81,13 @@ export default function Dashboard() {
       </motion.div>
 
       {/* Arena-wide stats — full-width row with room for large numbers */}
-      <motion.div variants={container} initial="hidden" animate="show" className="mb-8">
+      <motion.div variants={container} initial="hidden" animate="show">
         <motion.h2 variants={item} className="text-lg font-semibold mb-4">
           Arena Statistics
         </motion.h2>
         <motion.div variants={item} className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
           {stats.map(({ icon: Icon, label, value, color, bg }) => (
-            <Card key={label} className="border-border/60">
+            <Card key={label} className="border-border/60 bg-card/80 backdrop-blur-sm">
               <CardContent className="p-5">
                 <div className={`w-9 h-9 rounded-lg ${bg} flex items-center justify-center mb-3`}>
                   <Icon className={`w-5 h-5 ${color}`} />

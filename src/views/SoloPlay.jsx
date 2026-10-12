@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { base44 } from '@/api/base44Client';
 import { useQuery } from '@tanstack/react-query';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -29,10 +30,10 @@ const DEFAULT_SETTINGS = {
 };
 
 export default function SoloPlay() {
-  const urlParams = new URLSearchParams(window.location.search);
-  const preselectedRoundId = urlParams.get('roundId');
+  const searchParams = useSearchParams();
+  const preselectedRoundId = searchParams.get('roundId');
 
-  const [selectedRoundId, setSelectedRoundId] = useState(preselectedRoundId || '');
+  const [selectedRoundId, setSelectedRoundId] = useState('');
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [gameState, setGameState] = useState('setup'); // 'setup' | 'playing' | 'finished' | 'abandoned'
   const [activeQuestions, setActiveQuestions] = useState([]);
@@ -48,6 +49,11 @@ export default function SoloPlay() {
   const [gameKind, setGameKind] = useState('round');
   const [marathonConfig, setMarathonConfig] = useState(DEFAULT_MARATHON_CONFIG);
   const seedRef = useRef(0);
+
+  useEffect(() => {
+    if (!preselectedRoundId) return;
+    setSelectedRoundId(current => current || preselectedRoundId);
+  }, [preselectedRoundId]);
 
   useEffect(() => {
     base44.auth.me().then(setUser).catch(() => setUser(null));
